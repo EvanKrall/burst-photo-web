@@ -362,7 +362,7 @@ function accumulate(gpu, outPlane, plane, nImages) {
      { buffer: packUniforms(['i32', 'f32'], [plane.w, nImages]) }], groups(plane.w, plane.h));
 }
 
-async function sumToScalar(gpu, plane) {
+export async function sumToScalar(gpu, plane) {
   const n = plane.w * plane.h;
   const nPartials = Math.max(1, Math.ceil(n / 8192));
   const partials = new Plane(gpu.zeros('sum-partials', nPartials * 4), nPartials, 1);

@@ -525,6 +525,23 @@ fn gray_rgba8(@builtin(global_invocation_id) gid3: vec3<u32>) {
     g8_out[oy * g8_p.out_w + ox] = u | (u << 8u) | (u << 16u) | (255u << 24u);
 }
 
+// =================================================================== diff_f32
+// Port of viz.metal:abs_difference (incl. brightness-match gain/offset): full-resolution
+// per-pixel absolute difference |ref - (gain*comp + offset)| as an f32 plane, for render-time
+// statistics (mean |diff| via the sum kernels) and re-use in other render paths.
+// Params: w, gain, offset
+struct DiffFParams { w: i32, gain: f32, offset: f32, };
+@group(0) @binding(0) var<storage, read>       df_ref:  array<f32>;
+@group(0) @binding(1) var<storage, read>       df_comp: array<f32>;
+@group(0) @binding(2) var<storage, read_write> df_out:  array<f32>;
+@group(0) @binding(3) var<uniform>             df_p:    DiffFParams;
+
+@compute @workgroup_size(8, 8)
+fn diff_f32(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let i = i32(gid3.y) * df_p.w + i32(gid3.x);
+    df_out[i] = abs(df_ref[i] - (df_p.gain * df_comp[i] + df_p.offset));
+}
+
 // ============================================== sum_partials / sum_final
 // Two-stage reduction replacing texture_mean()'s sum_rect_columns + sum_row +
 // divide_buffer chain. Sums an array<f32> down to a single scalar.

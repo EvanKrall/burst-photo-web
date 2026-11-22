@@ -206,6 +206,30 @@ try {
       for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 12) nonBlack++;
       renders[mode] = { nonBlackRatio: nonBlack / (px.length / 4), info: r.info };
     }
+
+    // T7: rendering the REFERENCE frame in difference mode (with brightness match + anchor,
+    // so localMatch/globalMatch run) must not clobber the retained reference plane — the
+    // match helpers used to destroy the caller-owned refCropped buffer, blacking out every
+    // subsequent render that reads it (reference/original modes, all further diff renders).
+    const t7 = {};
+    {
+      const common = {
+        alignmentScale: session.alignmentScale, outWidth: 64, outHeight: 64,
+        diffGain: 4, diffWhiteOverride: null, matchExposure: true,
+        anchor: { u: 0.5, v: 0.5, tileX: session.tileInfo.w >> 1, tileY: session.tileInfo.h >> 1 },
+      };
+      const nb = (r) => {
+        const px = r.bitmap.rgba;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 12) n++;
+        return n / (px.length / 4);
+      };
+      t7.refDiff = nb(await session.renderFrame(0, { mode: 'difference', ...common }));
+      t7.refAfter = nb(await session.renderFrame(0, { mode: 'reference', ...common }));
+      t7.origAfter = nb(await session.renderFrame(0, { mode: 'original', ...common }));
+      t7.diffAfter = nb(await session.renderFrame(1, { mode: 'difference', ...common }));
+      t7.warpedAfter = nb(await session.renderFrame(1, { mode: 'warped', ...common }));
+    }
     session.destroy();
 
     return {
@@ -219,6 +243,7 @@ try {
       t5: { matchNoisy, matchShifted, medianDiffMean: session.medianDiffMean, calibrated: session.calibrated,
             progress: session.calibrationProgress },
       t6: renders,
+      t7,
     };
   });
 
@@ -258,6 +283,12 @@ try {
     for (const [mode, r] of Object.entries(out.t6)) {
       check(`T6 render ${mode}: non-trivial output`, r.nonBlackRatio > 0.1,
         `nonBlack=${(r.nonBlackRatio * 100).toFixed(0)}% — ${r.info.slice(0, 80)}`);
+    }
+    check('T7 ref difference render produces output', out.t7.refDiff > 0.1,
+      `nonBlack=${(out.t7.refDiff * 100).toFixed(0)}%`);
+    for (const k of ['refAfter', 'origAfter', 'diffAfter', 'warpedAfter']) {
+      check(`T7 renders after a ref difference render stay non-black (${k})`, out.t7[k] > 0.1,
+        `nonBlack=${(out.t7[k] * 100).toFixed(0)}%`);
     }
   }
 } catch (err) {

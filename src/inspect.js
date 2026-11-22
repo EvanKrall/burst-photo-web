@@ -270,7 +270,7 @@ export class InspectionSession {
     const aligned = await this.alignedPlane(idx);
     const pool = InspectionSession.pickPool(this.refCropped, 4);
     const pooled = await this.pooledPlane(aligned, pool);
-    aligned.buf.destroy();
+    if (!this.frame(idx).isRef) aligned.buf.destroy(); // the ref returns the retained refCropped
     const match = brightnessMatchValues(this.refPooled.values, pooled.values);
     this.matchCache.set(idx, match);
     return match;
@@ -287,7 +287,7 @@ export class InspectionSession {
     const aligned = await this.alignedPlane(idx);
     const pool = InspectionSession.pickPool(this.refCropped, 4);
     const pooled = await this.pooledPlane(aligned, pool);
-    aligned.buf.destroy();
+    if (!this.frame(idx).isRef) aligned.buf.destroy(); // the ref returns the retained refCropped
     const { values: comp, width, height } = pooled;
     const ref = this.refPooled.values;
     const centerX = Math.min(Math.max(Math.round(anchor.u * width), 0), width - 1);

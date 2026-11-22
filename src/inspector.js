@@ -837,6 +837,23 @@ export class InspectorUI {
       }
       const { bitmap, info } = await this.session.renderFrame(req.idx, { ...req.params, offsetX, offsetY });
       const prevBmp = this.currentBitmap;
+      // on a mode switch, capture where the viewport center sits in the current image
+      // (normalized 0..1) so the same content point can be restored in the new view —
+      // zooming into a subject and flipping Original/Warped/Reference/Merged with ←/→
+      // then keeps that subject under the same screen point. Normalized fractions are
+      // comparable across modes because every view maps the (same) image extent.
+      const modeChanged = this._renderedMode !== req.params.mode;
+      this._renderedMode = req.params.mode;
+      let centerFrac = null;
+      if (modeChanged && prevBmp) {
+        const wrap = this.el.imageWrap, holder = this.el.holder;
+        const cssW = this.el.canvas.clientWidth, cssH = this.el.canvas.clientHeight;
+        if (cssW > 0 && cssH > 0) {
+          const cx = wrap.scrollLeft + wrap.clientWidth / 2 - holder.offsetLeft;
+          const cy = wrap.scrollTop + wrap.clientHeight / 2 - holder.offsetTop;
+          centerFrac = { x: clamp(cx / cssW, 0, 1), y: clamp(cy / cssH, 0, 1) };
+        }
+      }
       this.currentBitmap = bitmap;
       this.state.renderedInfo = info;
       const ctx = this.el.canvas.getContext('2d');
@@ -857,15 +874,14 @@ export class InspectorUI {
       }
       this.applyCanvasSize();
       this.el.zoomBadge.hidden = this.state.zoom === 1;
-      // center on MODE switches only — bitmap dims also change by a few px when the
-      // scrollbar appears/disappears (wrap resize → new render target), and recentering
-      // on that would discard the zoom-at-point scroll set by setZoom moments earlier
-      const modeChanged = this._renderedMode !== req.params.mode;
-      this._renderedMode = req.params.mode;
+      // restore the pre-switch content point under the viewport center (zoom level is
+      // untouched). At fit this degrades to plain centering; same-mode renders (frame
+      // scrubs, anchor edits, target-size drift) keep the scroll exactly.
       if (modeChanged) {
-        const wrap = this.el.imageWrap;
-        wrap.scrollLeft = Math.max(0, (this.el.canvas.clientWidth - wrap.clientWidth) / 2);
-        wrap.scrollTop = Math.max(0, (this.el.canvas.clientHeight - wrap.clientHeight) / 2);
+        const wrap = this.el.imageWrap, holder = this.el.holder;
+        const f = centerFrac || { x: 0.5, y: 0.5 };
+        wrap.scrollLeft = f.x * this.el.canvas.clientWidth + holder.offsetLeft - wrap.clientWidth / 2;
+        wrap.scrollTop = f.y * this.el.canvas.clientHeight + holder.offsetTop - wrap.clientHeight / 2;
       }
       this.drawOverlay();
       this.refreshStatsBar();

@@ -329,7 +329,8 @@ export class InspectorUI {
       overlay.setPointerCapture(e.pointerId);
       const rect = this.fittedRect();
       const pos = this.overlayPos(e);
-      drag = { startX: pos.x, startY: pos.y, isRoi: false, liveRect: null, inside: rect.contains(pos.x, pos.y) };
+      drag = { startX: pos.x, startY: pos.y, isRoi: false, liveRect: null,
+               inside: pos.x >= rect.x && pos.x <= rect.x + rect.w && pos.y >= rect.y && pos.y <= rect.y + rect.h };
       e.preventDefault();
     });
     overlay.addEventListener('pointermove', (e) => {

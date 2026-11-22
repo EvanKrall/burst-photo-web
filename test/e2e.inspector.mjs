@@ -208,6 +208,57 @@ try {
   const statsAfterDown = await page.evaluate(() => document.getElementById('inspStatsLine').textContent);
   check('arrow-down selects the next frame', /frame 2/.test(statsAfterDown), statsAfterDown.slice(0, 60));
 
+  // image-area interactions: wheel zoom, drag = subject area, click = anchor, esc = clear ROI
+  const overlayBox = await (await page.$('#inspOverlay')).boundingBox();
+  const cx = overlayBox.x + overlayBox.width / 2, cy = overlayBox.y + overlayBox.height / 2;
+
+  await page.mouse.move(cx, cy);
+  await page.mouse.wheel({ deltaY: -600 });
+  await new Promise((r) => setTimeout(r, 300));
+  const zoomed = await page.evaluate(() => ({
+    badge: document.getElementById('inspZoomBadge').hidden === false,
+    scale: parseFloat(document.getElementById('inspCanvas').style.width) / document.getElementById('inspCanvas').width,
+  }));
+  check('wheel zooms the image', zoomed.badge && zoomed.scale > 1.3,
+    `badge=${zoomed.badge} scale=${zoomed.scale.toFixed(2)}`);
+  await page.keyboard.press('Escape'); // no ROI yet — must be a no-op
+  await page.evaluate(() => { window.__inspector.state.zoom = 1; window.__inspector.applyCanvasSize(); });
+  await new Promise((r) => setTimeout(r, 200));
+
+  // drag a subject-area rectangle on the left part of the image
+  await page.mouse.move(cx - overlayBox.width * 0.3, cy - overlayBox.height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(cx - overlayBox.width * 0.1, cy + overlayBox.height * 0.2, { steps: 8 });
+  await page.mouse.up();
+  await new Promise((r) => setTimeout(r, 500));
+  const roiState = await page.evaluate(() => ({
+    roi: window.__inspector.state.roi,
+    clearBtn: document.getElementById('inspClearRoi').hidden === false,
+    anchorFollows: window.__inspector.state.anchorManual === false,
+  }));
+  check('drag sets the subject area', roiState.roi != null && roiState.clearBtn,
+    `roi=${JSON.stringify(roiState.roi)}`);
+  check('anchor follows the ROI until taken manually', roiState.anchorFollows);
+
+  // a plain click sets the anchor and takes manual control
+  await page.mouse.move(cx + overlayBox.width * 0.25, cy + overlayBox.height * 0.1);
+  await page.mouse.down();
+  await page.mouse.up();
+  await new Promise((r) => setTimeout(r, 600));
+  const anchorState = await page.evaluate(() => ({
+    anchor: window.__inspector.state.anchor,
+    manual: window.__inspector.state.anchorManual,
+    clearBtn: document.getElementById('inspClearAnchor').hidden === false,
+  }));
+  check('click sets the anchor point', anchorState.anchor != null && anchorState.manual && anchorState.clearBtn,
+    `anchor=${JSON.stringify(anchorState.anchor)}`);
+
+  // escape clears the subject area
+  await page.keyboard.press('Escape');
+  await new Promise((r) => setTimeout(r, 400));
+  const escState = await page.evaluate(() => window.__inspector.state.roi);
+  check('escape clears the subject area', escState === null);
+
   // merge the remaining 3 frames → preview + download
   await page.click('#inspMerge');
   await page.waitForSelector('#previewPane:not([hidden])', { timeout: 120000 });

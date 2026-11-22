@@ -47,11 +47,18 @@ Open http://localhost:8080 in a WebGPU-capable browser (Chrome/Edge 113+,
 Safari 26, Firefox with WebGPU). Drop ≥2 DNGs from the same burst, press
 *Process burst*, get a preview and a 16-bit uncompressed Bayer DNG.
 
-The preview is a fast 2×2-block CFA→RGB render (nearest-neighbour "half-size"
-demosaic) with as-shot white balance and 2.2 gamma applied — enough to judge
-the merge. The downloaded DNG remains undeveloped RAW: full development
-(demosaic, color matrix, tone curve) belongs to your RAW converter, exactly
-like Burst Photo's output.
+The preview is **fully developed by flashraw from our own merged DNG** — the
+same bytes you download — so it shows exactly what a RAW converter will see:
+demosaic (half-size for speed), as-shot white balance, camera color matrix,
+sRGB encoding and orientation. (Earlier iterations used a hand-rolled
+2×2-block render; it survives in `src/preview.js` as a fallback.) The merged
+DNG carries `AsShotNeutral` derived from the camera's as-shot multipliers, so
+converters reproduce the camera's white balance instead of guessing.
+
+Note the division of labor: HDR+ *must* align and merge on the raw mosaic
+(pre-demosaic temporal denoising is the whole point of the algorithm), but
+preview/development is delegated to flashraw — we don't hand-roll color
+science.
 
 A local flashraw install is the reliable path: its `.wasm` binaries are
 `new URL(..., import.meta.url)` assets, which the bundled `server.mjs` serves

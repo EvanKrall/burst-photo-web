@@ -85,14 +85,13 @@ export function renderAlignmentField(texels, width, height, { scale = 8, offsetX
  */
 export function downsampleU16(pixels, width, height, outW, outH) {
   const out = new Float32Array(outW * outH);
-  const cellW = Math.max(1, Math.floor(width / outW));
-  const cellH = Math.max(1, Math.floor(height / outH));
+  // exact fractional cell boundaries — see downsampleRGBA
   for (let oy = 0; oy < outH; oy++) {
-    const y0 = Math.min(oy * cellH, height - 1);
-    const y1 = Math.min(y0 + cellH, height);
+    const y0 = Math.floor((oy * height) / outH);
+    const y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * height) / outH));
     for (let ox = 0; ox < outW; ox++) {
-      const x0 = Math.min(ox * cellW, width - 1);
-      const x1 = Math.min(x0 + cellW, width);
+      const x0 = Math.floor((ox * width) / outW);
+      const x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * width) / outW));
       let sum = 0, n = 0;
       for (let y = y0; y < y1; y++) {
         let i = y * width + x0;
@@ -112,14 +111,16 @@ export function downsampleU16(pixels, width, height, outW, outH) {
  */
 export function downsampleRGBA(rgba, width, height, outW, outH) {
   const out = new Uint8ClampedArray(outW * outH * 4);
-  const cellW = Math.max(1, Math.floor(width / outW));
-  const cellH = Math.max(1, Math.floor(height / outH));
+  // exact fractional cell boundaries: the cells partition the whole source, so no
+  // right/bottom remainder is dropped (integer cell sizes used to crop the bitmap to
+  // floor(width/outW)*outW — visible as a top-left zoom when the scale ratio had a
+  // fractional part). Upsampling (out > in) degenerates to nearest-neighbor.
   for (let oy = 0; oy < outH; oy++) {
-    const y0 = Math.min(oy * cellH, height - 1);
-    const y1 = Math.min(y0 + cellH, height);
+    const y0 = Math.floor((oy * height) / outH);
+    const y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * height) / outH));
     for (let ox = 0; ox < outW; ox++) {
-      const x0 = Math.min(ox * cellW, width - 1);
-      const x1 = Math.min(x0 + cellW, width);
+      const x0 = Math.floor((ox * width) / outW);
+      const x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * width) / outW));
       let r = 0, g = 0, b = 0, n = 0;
       for (let y = y0; y < y1; y++) {
         let i = (y * width + x0) * 4;

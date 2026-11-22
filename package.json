@@ -1,13 +1,13 @@
 {
   "name": "burst-photo-web",
   "version": "0.1.0",
-  "description": "Proof-of-concept web port of Burst Photo (HDR+ burst denoising) — HTML5 + flashraw + WebGPU",
+  "description": "Proof-of-concept web port of Burst Photo (HDR+ burst denoising) \u2014 HTML5 + flashraw + WebGPU",
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
     "build": "node scripts/build.mjs",
-    "test": "node test/roundtrip.mjs && node test/preview.mjs && node test/formats.mjs",
+    "test": "node test/roundtrip.mjs && node test/preview.mjs && node test/downsample.mjs && node test/formats.mjs",
     "vendor": "node scripts/vendor.mjs",
     "postinstall": "node scripts/vendor.mjs",
     "smoke": "node test/smoke.browser.mjs",

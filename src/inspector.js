@@ -667,9 +667,9 @@ export class InspectorUI {
     this.el.zoomBadge.hidden = false;
     this.el.zoomBadge.textContent = `×${zoom.toFixed(1)}  (double-click to reset)`;
     this.drawOverlay();
-    // re-render at the new device-pixel backing size (the developed source is cached, so
-    // this is just a fresh box-average — the pump coalesces wheel ticks)
-    this.scheduleRender();
+    // no re-render here: zoom beyond the fit-size backing is a CSS rescale of the same
+    // bitmap (the source's detail ceiling is reached around ×2 on a 24 MP frame anyway;
+    // a zoom-aware render target would double the per-size cache footprint)
   }
 
   applyCanvasSize() {

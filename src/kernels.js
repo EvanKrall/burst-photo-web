@@ -425,6 +425,106 @@ fn crop(@builtin(global_invocation_id) gid3: vec3<u32>) {
     crop_out[i32(gid3.y) * crop_p.out_w + i32(gid3.x)] = crop_in[y * crop_p.in_w + x];
 }
 
+// ============================================================ area_pool_f32
+// Area-average (fractional box) resampling of a plane to an arbitrary out_w × out_h.
+// JS counterpart: viz.downsampleValues (used for small CPU-side thumbnail math).
+// Params: in_w, in_h, out_w, out_h
+struct PoolAParams { in_w: i32, in_h: i32, out_w: i32, out_h: i32, };
+@group(0) @binding(0) var<storage, read>       pa_in:  array<f32>;
+@group(0) @binding(1) var<storage, read_write> pa_out: array<f32>;
+@group(0) @binding(2) var<uniform>             pa_p:   PoolAParams;
+
+@compute @workgroup_size(8, 8)
+fn area_pool_f32(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let ox = i32(gid3.x);
+    let oy = i32(gid3.y);
+    let x0 = i32(floor(f32(ox) * f32(pa_p.in_w) / f32(pa_p.out_w)));
+    let x1 = max(i32(floor(f32(ox + 1) * f32(pa_p.in_w) / f32(pa_p.out_w))), x0 + 1);
+    let y0 = i32(floor(f32(oy) * f32(pa_p.in_h) / f32(pa_p.out_h)));
+    let y1 = max(i32(floor(f32(oy + 1) * f32(pa_p.in_h) / f32(pa_p.out_h))), y0 + 1);
+    var sum = 0.0;
+    for (var y = y0; y < y1; y++) {
+        for (var x = x0; x < x1; x++) {
+            sum += pa_in[y * pa_p.in_w + x];
+        }
+    }
+    pa_out[oy * pa_p.out_w + ox] = sum / f32((y1 - y0) * (x1 - x0));
+}
+
+// ================================================================= diff_rgba8
+// Port of viz.metal:signed_difference_rgba8 + a pooled readback path: tonemap the SIGNED
+// difference (gain*comp + offset - ref) to red/blue (equality = black), area-average down to
+// out_w × out_h, and pack as RGBA8 u32 (r | g<<8 | b<<16 | a<<24) for a cheap readback.
+// Params: in_w, in_h, out_w, out_h, gain, offset, white_point
+struct Diff8Params {
+    in_w: i32, in_h: i32, out_w: i32, out_h: i32,
+    gain: f32, offset: f32, white_point: f32,
+};
+@group(0) @binding(0) var<storage, read>       d8_ref:  array<f32>;
+@group(0) @binding(1) var<storage, read>       d8_comp: array<f32>;
+@group(0) @binding(2) var<storage, read_write> d8_out:  array<u32>;
+@group(0) @binding(3) var<uniform>             d8_p:    Diff8Params;
+
+@compute @workgroup_size(8, 8)
+fn diff_rgba8(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let ox = i32(gid3.x);
+    let oy = i32(gid3.y);
+    let x0 = i32(floor(f32(ox) * f32(d8_p.in_w) / f32(d8_p.out_w)));
+    let x1 = max(i32(floor(f32(ox + 1) * f32(d8_p.in_w) / f32(d8_p.out_w))), x0 + 1);
+    let y0 = i32(floor(f32(oy) * f32(d8_p.in_h) / f32(d8_p.out_h)));
+    let y1 = max(i32(floor(f32(oy + 1) * f32(d8_p.in_h) / f32(d8_p.out_h))), y0 + 1);
+
+    // average the signed difference over the source box (averaging the tonemapped
+    // channels instead would let opposite-sign residuals cancel imperfectly)
+    var sum = 0.0;
+    let n = f32((y1 - y0) * (x1 - x0));
+    for (var y = y0; y < y1; y++) {
+        for (var x = x0; x < x1; x++) {
+            let i = y * d8_p.in_w + x;
+            sum += (d8_p.gain * d8_comp[i] + d8_p.offset) - d8_ref[i];
+        }
+    }
+    let difference = sum / n;
+    let white = max(d8_p.white_point, 1e-9);
+    let red = clamp(difference / white, 0.0, 1.0);
+    let blue = clamp(-difference / white, 0.0, 1.0);
+    let r = u32(red * 255.0 + 0.5);
+    let g = 0u;
+    let b = u32(blue * 255.0 + 0.5);
+    d8_out[oy * d8_p.out_w + ox] = r | (g << 8u) | (b << 16u) | (255u << 24u);
+}
+
+// ================================================================ gray_rgba8
+// Port of viz.metal:gray_to_rgba8 + a pooled readback path: tonemap a single-channel plane to
+// gray (value / white_point), area-average down to out_w × out_h, pack as RGBA8 u32.
+// Averaging happens on the tonemapped values, exactly like gray_to_rgba8 + CPU box downsample
+// of the resulting bitmap would (display-space averaging — matches the Swift pipeline).
+// Params: in_w, in_h, out_w, out_h, white_point
+struct Gray8Params { in_w: i32, in_h: i32, out_w: i32, out_h: i32, white_point: f32, };
+@group(0) @binding(0) var<storage, read>       g8_in:  array<f32>;
+@group(0) @binding(1) var<storage, read_write> g8_out: array<u32>;
+@group(0) @binding(2) var<uniform>             g8_p:   Gray8Params;
+
+@compute @workgroup_size(8, 8)
+fn gray_rgba8(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let ox = i32(gid3.x);
+    let oy = i32(gid3.y);
+    let x0 = i32(floor(f32(ox) * f32(g8_p.in_w) / f32(g8_p.out_w)));
+    let x1 = max(i32(floor(f32(ox + 1) * f32(g8_p.in_w) / f32(g8_p.out_w))), x0 + 1);
+    let y0 = i32(floor(f32(oy) * f32(g8_p.in_h) / f32(g8_p.out_h)));
+    let y1 = max(i32(floor(f32(oy + 1) * f32(g8_p.in_h) / f32(g8_p.out_h))), y0 + 1);
+
+    var sum = 0.0;
+    let n = f32((y1 - y0) * (x1 - x0));
+    for (var y = y0; y < y1; y++) {
+        for (var x = x0; x < x1; x++) {
+            sum += clamp(g8_in[y * g8_p.in_w + x] / max(g8_p.white_point, 1e-9), 0.0, 1.0);
+        }
+    }
+    let u = u32(clamp(sum / n, 0.0, 1.0) * 255.0 + 0.5);
+    g8_out[oy * g8_p.out_w + ox] = u | (u << 8u) | (u << 16u) | (255u << 24u);
+}
+
 // ============================================== sum_partials / sum_final
 // Two-stage reduction replacing texture_mean()'s sum_rect_columns + sum_row +
 // divide_buffer chain. Sums an array<f32> down to a single scalar.

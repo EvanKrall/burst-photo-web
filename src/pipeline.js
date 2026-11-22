@@ -23,7 +23,7 @@ function groups(d1, d2, d3) {
 }
 
 // Layer of the pyramid / intermediate plane: {buf, w, h}
-class Plane {
+export class Plane {
   constructor(buf, w, h) {
     this.buf = buf;
     this.w = w;
@@ -32,6 +32,35 @@ class Plane {
   get size() {
     return this.w * this.h * 4;
   }
+}
+
+export { groups, WORKGROUP };
+
+// Derivation of the pyramid/padding parameters shared verbatim by the merge pipeline
+// (alignMergeSpatial) and the alignment inspector (src/inspect.js) — both must use exactly
+// the same alignment setup so the visualization shows what the merge would use.
+// Returns { downscaleFactorArray, searchDistArray, tileSizeArray, nLevels, padX, padY }.
+export function deriveAlignmentSetup(width, height, tileSize, searchDistance, mosaic = 2) {
+  const minImageDim = Math.min(width, height);
+  const downscaleFactorArray = [mosaic];
+  const searchDistArray = [2];
+  const tileSizeArray = [tileSize];
+  let res = minImageDim / downscaleFactorArray[0];
+  while (res > searchDistance) {
+    downscaleFactorArray.push(2);
+    searchDistArray.push(2);
+    tileSizeArray.push(Math.max(tileSizeArray[tileSizeArray.length - 1] / 2, 8));
+    res /= 2;
+  }
+  const nLevels = downscaleFactorArray.length;
+
+  // padding so every pyramid level is a multiple of its tile size
+  const tileFactor = tileSizeArray[nLevels - 1] * downscaleFactorArray.reduce((a, b) => a * b, 1);
+  const padAlignX = Math.ceil(width / tileFactor);
+  const padX = Math.trunc((padAlignX * tileFactor - width) / 2);
+  const padAlignY = Math.ceil(height / tileFactor);
+  const padY = Math.trunc((padAlignY * tileFactor - height) / 2);
+  return { downscaleFactorArray, searchDistArray, tileSizeArray, nLevels, padX, padY };
 }
 
 export async function alignMergeSpatial(gpu, frames, options, onProgress) {
@@ -49,27 +78,8 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
   const robustness = 0.12 * Math.pow(1.3, robustnessRev) - 0.4529822;
   const blurKernelSize = 16; // binomial filter kernel for the merge stage
 
-  const minImageDim = Math.min(W, H);
-  const downscaleFactorArray = [mosaic];
-  const searchDistArray = [2];
-  const tileSizeArray = [tileSize];
-  let res = minImageDim / downscaleFactorArray[0];
-  while (res > searchDistance) {
-    downscaleFactorArray.push(2);
-    searchDistArray.push(2);
-    tileSizeArray.push(Math.max(tileSizeArray[tileSizeArray.length - 1] / 2, 8));
-    res /= 2;
-  }
-  const nLevels = downscaleFactorArray.length;
-
-  // padding so every pyramid level is a multiple of its tile size
-  const tileFactor = tileSizeArray[nLevels - 1] * downscaleFactorArray.reduce((a, b) => a * b, 1);
-  const padAlignX = Math.ceil(W / tileFactor);
-  const padX = Math.trunc((padAlignX * tileFactor - W) / 2);
-  const padAlignY = Math.ceil(H / tileFactor);
-  const padY = Math.trunc((padAlignY * tileFactor - H) / 2);
-  const W2 = W + 2 * padX;
-  const H2 = H + 2 * padY;
+  const { downscaleFactorArray, searchDistArray, tileSizeArray, nLevels, padX, padY } =
+    deriveAlignmentSetup(W, H, tileSize, searchDistance);
 
   // ---- output accumulator ---------------------------------------------------
   const outPlane = new Plane(gpu.zeros('out-accumulator', W * H * 4), W, H);
@@ -164,9 +174,9 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
 }
 
 // ---------------------------------------------------------------------------
-// stage helpers
+// stage helpers (also used by the alignment inspector — see src/inspect.js)
 
-async function prepareFrame(gpu, frame, padX, padY) {
+export async function prepareFrame(gpu, frame, padX, padY) {
   const { width: W, height: H } = frame;
   // pack two 16-bit samples per u32 (zero-copy view over the Uint16Array)
   const packed = new Uint32Array(frame.data.buffer, frame.data.byteOffset, Math.floor((W * H) / 2));
@@ -185,7 +195,7 @@ async function prepareFrame(gpu, frame, padX, padY) {
 // level i is avg_pool(blur(level i-1, kernel 2, mosaic 1), scale = downscale_list[i]).
 // Note the pyramid BASE is therefore HALF the padded resolution for Bayer (downscale_list[0]
 // = mosaic_pattern_width = 2) — tile grids and the warp are defined on that half-res base.
-function buildPyramid(gpu, basePadded, downscaleFactorArray, blackMean) {
+export function buildPyramid(gpu, basePadded, downscaleFactorArray, blackMean) {
   const pyramid = [avgPool(gpu, basePadded, downscaleFactorArray[0], blackMean)];
   let cur = pyramid[0];
   for (let i = 1; i < downscaleFactorArray.length; i++) {
@@ -210,7 +220,7 @@ function blurPlane(gpu, plane, kernelSize, mosaicPatternWidth) {
   return out;
 }
 
-function avgPool(gpu, plane, scale, blackLevel) {
+export function avgPool(gpu, plane, scale, blackLevel) {
   const outW = Math.floor(plane.w / scale);
   const outH = Math.floor(plane.h / scale);
   const out = new Plane(gpu.zeros('pool-out', outW * outH * 4), outW, outH);
@@ -220,7 +230,7 @@ function avgPool(gpu, plane, scale, blackLevel) {
   return out;
 }
 
-function crop(gpu, plane, padX, padY) {
+export function crop(gpu, plane, padX, padY) {
   const outW = plane.w - 2 * padX;
   const outH = plane.h - 2 * padY;
   const out = new Plane(gpu.zeros('crop-out', outW * outH * 4), outW, outH);
@@ -238,8 +248,15 @@ function upsampleNearest(gpu, align, outW, outH) {
   return out;
 }
 
-// Port of align_texture(): coarse-to-fine pyramid alignment.
-function alignTexture(gpu, refPyramid, compPadded, { nLevels, downscaleFactorArray, tileSizeArray, compBlackMean }) {
+// Port of align_texture_ex(): coarse-to-fine pyramid alignment that also returns the final
+// alignment grid (the port of the rg16Sint alignment texture): a GPU buffer of
+// array<vec2<i32>> with one (dx, dy) texel per tile, shifts in pyramid level-0 pixels.
+// Multiply by `downscale` to get sensor-pixel shifts. The caller owns alignment.buf and must
+// destroy it (the plain alignTexture wrapper below does).
+// The returned tile geometry describes the level-0 grid: tiles of `tileSize` level-0 px with
+// 50% overlap, grid pitch = tileSize/2, tile (ix, iy) centered at level-0 (ix+1, iy+1)*tileSize/2
+// (see the warp kernel).
+export function alignTextureEx(gpu, refPyramid, compPadded, { nLevels, downscaleFactorArray, tileSizeArray, compBlackMean }) {
   const compPyramid = buildPyramid(gpu, compPadded, downscaleFactorArray, compBlackMean);
 
   // 1x1 initial alignment (all zeros)
@@ -293,8 +310,23 @@ function alignTexture(gpu, refPyramid, compPadded, { nLevels, downscaleFactorArr
        [compPadded.w, compPadded.h, halfTile, nTilesX, nTilesY, downscaleFactorArray[0]]) }], groups(compPadded.w, compPadded.h));
 
   for (const p of compPyramid.slice(1)) p.buf.destroy();
-  prevAlign.buf.destroy();
-  return out;
+  return {
+    warped: out,
+    alignment: {
+      buf: prevAlign.buf,
+      w: nTilesX,
+      h: nTilesY,
+      tileSize: tileSizeArray[0],
+      downscale: downscaleFactorArray[0],
+    },
+  };
+}
+
+// Plain align_texture(): only the warped texture is needed; the alignment grid is discarded.
+function alignTexture(gpu, refPyramid, compPadded, opts) {
+  const result = alignTextureEx(gpu, refPyramid, compPadded, opts);
+  result.alignment.buf.destroy();
+  return result.warped;
 }
 
 function colorDifference(gpu, plane1, plane2, mosaic) {

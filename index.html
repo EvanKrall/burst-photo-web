@@ -8,22 +8,37 @@
   <style>
     :root { color-scheme: dark; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #111418; color: #d8dde4; margin: 0 auto; max-width: 960px; padding: 2rem;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #111418; color: #d8dde4; margin: 0; padding: 1.5rem 2rem;
     }
-    h1 { font-weight: 600; font-size: 1.4rem; margin: 0 0 0.25rem; }
+    h1 { font-weight: 600; font-size: 1.4rem; margin: 0; }
     h2 { font-weight: 600; font-size: 1.2rem; margin: 0 0 0.25rem; }
     p { color: #8a929c; margin-bottom: 1.5rem; }
     li { color: #8a929c; }
+
+    /* Two-pane layout: settings / Process Burst / download / log live in the
+       left panel; the right "stage" pane shows exactly one view at a time
+       (intro, progress, or preview) — switched by src/main.js. */
+    #app { display: flex; gap: 2rem; align-items: flex-start; }
+    #panel { flex: 0 0 320px; display: flex; flex-direction: column; gap: 1rem; }
+    #stage { flex: 1; min-width: 0; }
+    /* text-heavy views keep a readable measure on wide screens; the preview
+       pane is uncapped and takes all the space the window offers */
+    #intro, #progressPane { max-width: 640px; }
+    #stage.dropping { outline: 2px dashed #4a9eff; outline-offset: 8px; border-radius: 8px; }
+    #stage.dropping #drop { border-color: #4a9eff; background: #16202b; }
+    @media (max-width: 760px) {
+      #app { flex-direction: column; }
+      #panel { flex: none; width: auto; }
+    }
+
     #drop {
       border: 2px dashed #3a4149; border-radius: 12px; padding: 2.5rem;
       text-align: center; cursor: pointer; transition: border-color .2s, background .2s;
     }
-    #drop.hover { border-color: #4a9eff; background: #16202b; }
     #drop strong { color: #4a9eff; }
     .controls {
       display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: center;
-      margin: 1.25rem 0; padding: 1rem; background: #181d24; border-radius: 12px;
+      padding: 1rem; background: #181d24; border-radius: 12px;
     }
     .controls label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.8rem; color: #8a929c; }
     select, button {
@@ -33,82 +48,105 @@
     button.primary { background: #1c4e80; border-color: #2b6cb0; cursor: pointer; font-weight: 600; }
     button.primary:hover { background: #245d9a; }
     button.primary:disabled { opacity: 0.4; cursor: default; }
-    #progressWrap { display: none; margin: 1rem 0; }
+    #progressWrap { margin: 1rem 0; }
     #progressBar { height: 8px; background: #222a33; border-radius: 4px; overflow: hidden; }
-    #progressFill { height: 100%; width: 0%; background: #4a9eff; transition: width .15s; }
+    #progressFill { height: 100%; width: 0%; background: #4a9eff; }
+    #progressText { font-size: 0.8rem; color: #8a929c; margin-top: 0.35rem; }
     #log {
       background: #0c0e11; border: 1px solid #22272e; border-radius: 8px;
       font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.75rem;
       padding: 0.75rem; height: 180px; overflow-y: auto; white-space: pre-wrap;
     }
-    #result { margin-top: 1.5rem; display: none; }
-    #canvas { max-width: 100%; border-radius: 8px; image-rendering: auto; }
+    /* replaced element: max-width + max-height scale it down proportionally,
+       so a landscape or portrait preview always fits without overflow */
+    #canvas { max-width: 100%; max-height: calc(100vh - 8rem); border-radius: 8px; image-rendering: auto; }
     #download {
-      display: inline-block; margin-top: 0.75rem; background: #1c4e80; color: #fff;
+      display: inline-block; background: #1c4e80; color: #fff;
       padding: 0.5rem 1rem; border-radius: 8px; text-decoration: none; font-weight: 600;
     }
+    /* greyed out until a merged DNG is available; href is also removed so it
+       can't be activated by keyboard while disabled */
+    #download.disabled { opacity: 0.4; pointer-events: none; }
+    #panel h2 { font-size: 0.9rem; margin: 0; color: #8a929c; }
+    .hint { color: #8a929c; font-size: 0.85rem; margin-top: 0.75rem; }
     .error { color: #ff6b6b; }
   </style>
 </head>
 <body>
-  <h1>Burst Photo Web</h1>
-  <p>
-    This is a port of <a href="https://github.com/martin-marek/hdr-plus-swift" style="color:#4a9eff">Burst Photo</a> that runs in your browser, using WebGPU for acceleration. See <a href="https://burst.photo/tech/">https://burst.photo/tech/</a> for a nice explanation of how the algorithms work.
-    For processing of camera raw files, this uses <a href="https://flashraw.ybouane.com">FlashRaw</a>.
-  </p>
-  <p>
-    This port is vibecoded. If you prefer human-written code, I recommend the original Burst Photo, but unfortunately it's Mac-only.
-  </p>
-  <p>
-    Your photos are processed entirely within your browser, rather than being uploaded to the cloud.
-  </p>
-  <h2>Instructions</h2>
-  <ol>
-    <li>Drag multiple raw files representing one burst of photos into the box below</li>
-    <li>Once the files have been loaded, click "Process Burst"</li>
-    <li>If you're happy with the result, click "Download merged.dng" below the preview</li>
-  </ol>
+  <div id="app">
+    <aside id="panel">
+      <h1>Burst Photo Web</h1>
 
-  <div id="drop">
-    Drop <strong>RAW burst files</strong> here (.dng, .nef, .arw, .cr3, .raf, … — same camera &amp; size)<br>
-    or click to choose files
-    <input id="fileInput" type="file" accept=".dng,.nef,.nrw,.arw,.srf,.sr2,.arq,.cr2,.cr3,.crw,.raf,.rwl,.rw2,.orf,.ori,.pef,.srw,.mrw,.iiq,.mos,.3fr,.fff,.kdc,.dcr,.dcs,.erf,.mef,.x3f,.ari" multiple hidden>
-  </div>
+      <div class="controls">
+        <label>Noise reduction
+          <select id="noiseReduction">
+            <option>0</option><option>4</option><option>8</option><option>12</option>
+            <option selected>13</option><option>16</option><option>20</option><option>23</option>
+          </select>
+        </label>
+        <label>Tile size
+          <select id="tileSize">
+            <option value="16">Small</option>
+            <option value="32" selected>Medium</option>
+            <option value="64">Large</option>
+          </select>
+        </label>
+        <label>Search distance
+          <select id="searchDistance">
+            <option value="128">Small</option>
+            <option value="64" selected>Medium</option>
+            <option value="32">Large</option>
+          </select>
+        </label>
+        <button id="process" class="primary" disabled>Process burst</button>
+      </div>
 
-  <div class="controls">
-    <label>Noise reduction
-      <select id="noiseReduction">
-        <option>0</option><option>4</option><option>8</option><option>12</option>
-        <option selected>13</option><option>16</option><option>20</option><option>23</option>
-      </select>
-    </label>
-    <label>Tile size
-      <select id="tileSize">
-        <option value="16">Small (16)</option>
-        <option value="32" selected>Medium (32)</option>
-        <option value="64">Large (64)</option>
-      </select>
-    </label>
-    <label>Search distance
-      <select id="searchDistance">
-        <option value="128">Small (128)</option>
-        <option value="64" selected>Medium (64)</option>
-        <option value="32">Large (32)</option>
-      </select>
-    </label>
-    <button id="process" class="primary" disabled>Process burst</button>
-  </div>
+      <h2>Log:</h2>
 
-  <div id="progressWrap">
-    <div id="progressBar"><div id="progressFill"></div></div>
-    <div id="progressText" style="font-size:0.8rem;color:#8a929c;margin-top:0.35rem;"></div>
-  </div>
-  <pre id="log"></pre>
+      <pre id="log"></pre>
 
-  <div id="result">
-    <canvas id="canvas"></canvas>
-    <br>
-    <a id="download" download="merged.dng">Download merged.dng</a>
+      <a id="download" class="disabled" download="merged.dng">Download merged.dng</a>
+    </aside>
+
+    <main id="stage">
+      <!-- exactly one of these three sections is visible at a time -->
+      <section id="intro">
+        <p>
+          This is a port of <a href="https://github.com/martin-marek/hdr-plus-swift" style="color:#4a9eff">Burst Photo</a> that runs in your browser, using WebGPU for acceleration. See <a href="https://burst.photo/tech/" style="color:#4a9eff">https://burst.photo/tech/</a> for a nice explanation of how the algorithms work.
+          For processing of camera raw files, this uses <a href="https://flashraw.ybouane.com" style="color:#4a9eff">FlashRaw</a>.
+        </p>
+        <p>
+          This port is vibecoded. If you prefer human-written code, I recommend the original Burst Photo, but unfortunately it's Mac-only.
+        </p>
+        <p>
+          Your photos are processed entirely within your browser, rather than being uploaded to the cloud.
+        </p>
+        <h2>Instructions</h2>
+        <ol>
+          <li>Drag multiple raw files representing one burst of photos into the box below — once they're loaded, processing starts automatically</li>
+          <li>To reprocess with different settings, adjust them and click "Process Burst"</li>
+          <li>If you're happy with the result, click "Download merged.dng" in the panel on the left</li>
+        </ol>
+
+        <div id="drop">
+          Drop <strong>RAW burst files</strong> here (.dng, .nef, .arw, .cr3, .raf, … — same camera &amp; size)<br>
+          or click to choose files
+          <input id="fileInput" type="file" accept=".dng,.nef,.nrw,.arw,.srf,.sr2,.arq,.cr2,.cr3,.crw,.raf,.rwl,.rw2,.orf,.ori,.pef,.srw,.mrw,.iiq,.mos,.3fr,.fff,.kdc,.dcr,.dcs,.erf,.mef,.x3f,.ari" multiple hidden>
+        </div>
+      </section>
+
+      <section id="progressPane" hidden>
+        <div id="progressWrap">
+          <div id="progressBar"><div id="progressFill"></div></div>
+          <div id="progressText"></div>
+        </div>
+      </section>
+
+      <section id="previewPane" hidden>
+        <canvas id="canvas"></canvas>
+        <p class="hint">Drop a new burst anywhere on this pane to process another stack.</p>
+      </section>
+    </main>
   </div>
 
   <script type="module" src="src/main.js"></script>

@@ -81,8 +81,9 @@ npm start         # zero-dependency static server on http://localhost:8080
 ```
 
 Open http://localhost:8080 in a WebGPU-capable browser (Chrome/Edge 113+,
-Safari 26, Firefox with WebGPU). Drop ≥2 RAW files from the same burst, press
-*Process burst*, get a preview and a 16-bit uncompressed Bayer DNG.
+Safari 26, Firefox with WebGPU). Drop ≥2 RAW files from the same burst and
+merging starts automatically — you get a preview and a 16-bit uncompressed
+Bayer DNG. Adjust the settings and press *Process burst* to re-run.
 
 **Input formats**: everything flashraw decodes — DNG, NEF/NRW, ARW/SR2/SRF/ARQ,
 CR2/CR3/CRW, RAF, RW2/RWL, ORF, PEF, SRW, MRW, IIQ, 3FR/FFF, KDC/DCR/DCS, ERF,

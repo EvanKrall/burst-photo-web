@@ -119,10 +119,23 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
                      compBlurred.buf, texDiff.buf, weight.buf, weightUp.buf, merged.buf]) {
       b.destroy();
     }
+
+    // Wait for the GPU to actually finish frame f before starting frame f+1.
+    // dispatch() only enqueues work, and a setTimeout(0) yield (~1-4 ms) is far
+    // shorter than a vsync — so without this await the loop outruns both the
+    // GPU and the compositor: all onProgress messages fire within a few tens
+    // of ms, most updates coalesce away unpainted, and the bar freezes at an
+    // early value for the entire multi-second GPU drain. Awaiting
+    // onSubmittedWorkDone makes each message mean "frame f is done" and gives
+    // the browser hundreds of ms of idle main thread to paint between updates.
+    // Cost: the GPU idles a few ms per frame boundary — negligible here.
+    await device.queue.onSubmittedWorkDone();
   }
 
-  // add reference frame contribution
-  onProgress?.({ stage: 'accumulate-ref', frame: 0, total: nImages });
+  // add reference frame contribution — the last work unit, so report the
+  // frame counter at its end value: caller-side frame/total progress then
+  // lands on 1 instead of jumping back to the start of the stage
+  onProgress?.({ stage: 'accumulate-ref', frame: nImages, total: nImages });
   accumulate(gpu, outPlane, refCropped, nImages);
 
   const tMerge = performance.now();

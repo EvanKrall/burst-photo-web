@@ -451,8 +451,8 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
       wallMs: performance.now() - tAll,
     };
     if (returnToInspector && inspector) {
+      showPane('inspector'); // pane must be visible before the UI measures its canvas area
       inspector.setMerged(payload);
-      showPane('inspector');
       setProgress(stageProgress('preview', 1), 'done');
       log(`Merged result added to the inspector as the "Merged" view (${(payload.wallMs / 1000).toFixed(2)} s wall) — download the DNG from there.`);
     } else {

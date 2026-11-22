@@ -407,6 +407,9 @@ try {
     return {
       lit: lit / (d.length / 4),
       colored: colored / (d.length / 4),
+      canvasW: c.width,
+      canvasH: c.height,
+      cssW: c.clientWidth,
       info: document.getElementById('inspInfoLine').textContent,
     };
   });
@@ -414,6 +417,11 @@ try {
     `lit=${(mergedView.lit * 100).toFixed(0)}% — ${mergedView.info.slice(0, 80)}`);
   check('Merged view shows developed color (not a gray tonemap)', mergedView.colored > 0.02,
     `colored=${(mergedView.colored * 100).toFixed(0)}%`);
+  // the first Merged render must target the real pane size: measuring the canvas area
+  // while the pane is still hidden used to clamp the render to the 64px minimum,
+  // producing a thumbnail-scaled-up image until the user switched modes
+  check('Merged view renders at (near) display resolution', mergedView.canvasW >= mergedView.cssW * 0.5,
+    `backing ${mergedView.canvasW}x${mergedView.canvasH} vs css ${mergedView.cssW}px`);
 
   // the merge bar's "Download DNG" fires the app download link (blob + name already set)
   const merged = await page.evaluate(() => ({

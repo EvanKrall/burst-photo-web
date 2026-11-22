@@ -278,6 +278,19 @@ export class InspectorUI {
   bindEvents() {
     const el = this.el;
 
+    // the render target size is measured from the pane's live box, so a pane size change
+    // (hidden → shown, window resize, column drag) needs a re-render at the new size;
+    // wrap is flex-sized (not content-sized), so canvas resizes can't feed back into this
+    this._lastPaneSize = null;
+    this.paneObserver = new ResizeObserver((entries) => {
+      const r = entries[0].contentRect;
+      const size = `${Math.round(r.width)}x${Math.round(r.height)}`;
+      if (size === this._lastPaneSize) return;
+      this._lastPaneSize = size;
+      if (r.width > 0 && r.height > 0) this.scheduleRender();
+    });
+    this.paneObserver.observe(el.imageWrap);
+
     // toolbar: mode + per-mode controls
     el.modes.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-mode]');
@@ -438,6 +451,7 @@ export class InspectorUI {
   }
 
   destroy() {
+    if (this.paneObserver) this.paneObserver.disconnect();
     window.removeEventListener('keydown', this.keyHandler);
     this.aborted = true;
   }
@@ -749,9 +763,13 @@ export class InspectorUI {
     // device pixels: the canvas backing store must match the on-screen pixel grid, or
     // retina-class displays upscale the bitmap 2× and photo views look soft
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    let w = Math.min(wrap.clientWidth - 24, 1440) * dpr;
+    let cw = wrap.clientWidth - 24;
+    let ch = wrap.clientHeight - 24;
+    if (!(cw > 0)) cw = 1440; // pane hidden / not laid out yet — assume a typical fit size
+    if (!(ch > 0)) ch = 900;
+    let w = Math.min(cw, 1440) * dpr;
     let h = Math.round(w / aspect);
-    const maxH = Math.max(Math.round((wrap.clientHeight - 24) * dpr), 100);
+    const maxH = Math.max(Math.round(ch * dpr), 100);
     if (h > maxH) {
       h = maxH;
       w = Math.round(h * aspect);

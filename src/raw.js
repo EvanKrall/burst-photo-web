@@ -19,7 +19,10 @@
 
 const FLASHRAW_SOURCES = [
   'flashraw',                                      // bare specifier: Node.js / bundlers
-  '/node_modules/flashraw/dist/browser.js',        // local npm install, served by server.mjs
+  // vendored copy for static hosting (works at any subpath):
+  //   cp -r node_modules/flashraw/dist  <site>/vendor/flashraw/dist
+  new URL('../vendor/flashraw/dist/browser.js', import.meta.url).href,
+  '/node_modules/flashraw/dist/browser.js',        // npm install + server.mjs dev flow
   'https://cdn.jsdelivr.net/npm/flashraw/+esm',    // jsDelivr ESM build (best-effort)
   'https://esm.sh/flashraw',                       // esm.sh fallback (best-effort)
 ];

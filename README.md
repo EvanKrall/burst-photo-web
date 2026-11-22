@@ -35,6 +35,35 @@ motion-rejected). Both suites currently pass.
   (CDN ESM fallbacks are attempted but best-effort).
 - flashraw also runs in Node, which is what makes `npm test` possible.
 
+## Deploying (static hosting)
+
+The app is pure static files — no build step, no server code. Copy this layout
+anywhere that serves HTTPS:
+
+```
+site/
+├── index.html
+├── src/                    # the 7 JS modules, unchanged
+│   ├── main.js  gpu.js  kernels.js  pipeline.js
+│   ├── raw.js   preview.js  dng_writer.js
+└── vendor/flashraw/dist/   # cp -r node_modules/flashraw/dist vendor/flashraw/dist
+```
+
+- **HTTPS is required** — WebGPU only exists in secure contexts (localhost
+  excepted).
+- Serve `.wasm` as `application/wasm` (required for streaming compilation;
+  GitHub Pages and most hosts do this already).
+- No COOP/COEP headers needed (the single-threaded decode path is used).
+- Works at a subpath (e.g. `example.com/burstphoto/`) — the vendored flashraw
+  path is resolved relative to `src/raw.js`.
+- `server.mjs`, `test/`, `package.json` are development-only and not deployed.
+- Without the `vendor/` folder the loader falls back to CDN ESM builds
+  (jsDelivr/esm.sh) — works, but vendoring is the reliable path since the
+  `.wasm` binaries are `import.meta.url` assets.
+
+A `FlashRaw.init({ baseUrl })` override exists in flashraw if you prefer a
+different asset location.
+
 ## Running
 
 ```bash

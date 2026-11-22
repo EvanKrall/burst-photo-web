@@ -63,6 +63,7 @@ export class InspectorUI {
       clearAnchor: $('inspClearAnchor'),
       setAfRoi: $('inspSetAfRoi'),
       clearRoi: $('inspClearRoi'),
+      roiColor: $('inspRoiColor'),
       colHead: $('inspColHead'),
       frameList: $('inspFrameList'),
       imageWrap: $('inspImageWrap'),
@@ -320,6 +321,17 @@ export class InspectorUI {
       el.diffGainLabel.textContent = `gain ${this.state.diffGain.toFixed(1)}`;
       this.scheduleRender();
     });
+    // subject box color: the select is the source of truth; restore the persisted choice
+    try {
+      const saved = localStorage.getItem('bpw.subjectBoxColor');
+      if (saved) el.roiColor.value = saved;
+    } catch { /* storage unavailable (file:// etc.) */ }
+    if (!el.roiColor.value) el.roiColor.value = 'white'; // saved value wasn't one of the options
+    el.roiColor.addEventListener('change', () => {
+      try { localStorage.setItem('bpw.subjectBoxColor', el.roiColor.value); } catch { /* ignore */ }
+      this.drawOverlay();
+    });
+
     el.clearAnchor.addEventListener('click', () => {
       this.state.anchor = null;
       this.state.anchorManual = true; // manual removal: ROI changes no longer re-place the anchor
@@ -711,30 +723,22 @@ export class InspectorUI {
     const rect = this.fittedRect();
     if (!rect.w) return;
 
-    // committed subject area (darken everything outside it)
+    // committed subject area: box boundary only (color from the toolbar setting), no
+    // darkened surround — the photo views must stay readable inside and outside the box
     const roi = this.state.roi;
+    const boxColor = this.el.roiColor.value || 'white';
     if (roi && !liveRect) {
       const x0 = rect.x + roi.x0 * rect.w, y0 = rect.y + roi.y0 * rect.h;
       const x1 = rect.x + roi.x1 * rect.w, y1 = rect.y + roi.y1 * rect.h;
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(0, 0, overlay.width, y0);
-      ctx.fillRect(0, y1, overlay.width, overlay.height - y1);
-      ctx.fillRect(0, y0, x0, y1 - y0);
-      ctx.fillRect(x1, y0, overlay.width - x1, y1 - y0);
-      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0 - 1, y1 - y0 - 1);
+      ctx.strokeStyle = boxColor;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2);
     }
-    // in-progress drag rectangle (solid, slightly brighter)
+    // in-progress drag rectangle (same color, thinner)
     if (liveRect) {
       const x0 = rect.x + liveRect.x0 * rect.w, y0 = rect.y + liveRect.y0 * rect.h;
       const x1 = rect.x + liveRect.x1 * rect.w, y1 = rect.y + liveRect.y1 * rect.h;
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(0, 0, overlay.width, y0);
-      ctx.fillRect(0, y1, overlay.width, overlay.height - y1);
-      ctx.fillRect(0, y0, x0, y1 - y0);
-      ctx.fillRect(x1, y0, overlay.width - x1, y1 - y0);
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.strokeStyle = boxColor;
       ctx.lineWidth = 1.5;
       ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
     }

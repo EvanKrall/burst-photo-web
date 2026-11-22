@@ -94,6 +94,7 @@
     .insp-ctl input[type="range"] { width: 110px; }
     .insp-ctl input[type="checkbox"] { accent-color: #4a9eff; }
     #inspClearAnchor, #inspSetAfRoi, #inspClearRoi { font-size: 0.75rem; padding: 0.2rem 0.6rem; cursor: pointer; }
+    #inspRoiColor { font-size: 0.75rem; }
     #inspMain { flex: 1; display: flex; min-height: 0; }
     #inspSidebar {
       flex: 0 0 252px; display: flex; flex-direction: column; min-height: 0;
@@ -276,6 +277,18 @@
           <button id="inspClearAnchor" hidden>Clear anchor</button>
           <button id="inspSetAfRoi" hidden title="Use the autofocus area read from the reference frame's maker notes as the subject area">Set subject from autofocus point</button>
           <button id="inspClearRoi" hidden>Clear subject</button>
+          <label class="insp-ctl" title="Subject box color">box
+            <select id="inspRoiColor">
+              <option>white</option>
+              <option>black</option>
+              <option>red</option>
+              <option>green</option>
+              <option>blue</option>
+              <option>cyan</option>
+              <option>magenta</option>
+              <option>yellow</option>
+            </select>
+          </label>
         </div>
         <div id="inspMain">
           <div id="inspSidebar">

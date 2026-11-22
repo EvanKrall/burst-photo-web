@@ -271,6 +271,41 @@ try {
   const infoAfterModes = await page.evaluate(() => document.getElementById('inspInfoLine').textContent);
   check('render info present after mode switches', infoAfterModes.length > 20, infoAfterModes.slice(0, 90));
 
+  // subject box overlay: boundary stroke only (no darkened surround), color from the
+  // toolbar setting
+  const box = await page.evaluate(() => {
+    const insp = window.__inspector;
+    const ov = document.getElementById('inspOverlay');
+    const sel = document.getElementById('inspRoiColor');
+    const opts = [...sel.options].map((o) => o.value);
+    const rect = insp.fittedRect();
+    const roi = insp.state.roi;
+    const x0 = Math.round(rect.x + roi.x0 * rect.w), y0 = Math.round(rect.y + roi.y0 * rect.h);
+    const y1 = Math.round(rect.y + roi.y1 * rect.h);
+    const ctx = ov.getContext('2d');
+    const px = (x, y) => [...ctx.getImageData(x, y, 1, 1).data];
+    const outside = px(2, 2); // far corner: outside the box
+    sel.value = 'red';
+    sel.dispatchEvent(new Event('change'));
+    // the 2px stroke centers on a half-pixel coordinate; two adjacent pixels straddle it,
+    // so take the more-covered one
+    const mid = Math.round((y0 + y1) / 2);
+    const border = [px(x0, mid), px(x0 + 1, mid)].sort((p, q) => q[3] - p[3])[0];
+    const [r, g, b2, a] = border;
+    // restore the default for the rest of the run
+    sel.value = 'white';
+    sel.dispatchEvent(new Event('change'));
+    return { opts, outside, border: [r, g, b2, a] };
+  });
+  check('subject box color setting has the 8 colors, defaults to white',
+    box.opts.length === 8 && box.opts[0] === 'white' && ['black','red','green','blue','cyan','magenta','yellow'].every((c) => box.opts.includes(c)),
+    box.opts.join(','));
+  check('subject box area outside the box is not darkened (transparent)',
+    box.outside[3] === 0, `outside px=${box.outside}`);
+  check('subject box border strokes in the chosen color (red)',
+    box.border[3] === 255 && box.border[0] > 200 && box.border[1] < 60 && box.border[2] < 60,
+    `border px=${box.border}`);
+
   // arrow-key scrub moves the selection (in frame order)
   await page.click('#inspColHead button[data-sort="0"]');
   await page.evaluate(() => {

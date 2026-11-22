@@ -656,14 +656,24 @@ export class InspectorUI {
   setZoom(zoom, anchorEvent = null) {
     const wrap = this.el.imageWrap;
     const prevScale = this.displayScale();
-    // content point under the cursor (or center) stays put
-    const cx = anchorEvent ? this.overlayPos(anchorEvent).x + wrap.scrollLeft : wrap.clientWidth / 2 + wrap.scrollLeft;
-    const cy = anchorEvent ? this.overlayPos(anchorEvent).y + wrap.scrollTop : wrap.clientHeight / 2 + wrap.scrollTop;
+    // anchor point in canvas CSS space: overlayPos is canvas-relative (measured against
+    // the overlay, which spans the canvas), so the content point under the cursor is
+    // overlayPos itself — no scroll term. Center anchor = viewport center in canvas space.
+    const ax = anchorEvent ? this.overlayPos(anchorEvent).x : wrap.clientWidth / 2 + wrap.scrollLeft;
+    const ay = anchorEvent ? this.overlayPos(anchorEvent).y : wrap.clientHeight / 2 + wrap.scrollTop;
+    const sl = wrap.scrollLeft, st = wrap.scrollTop;
+    const holder = this.el.holder;
+    const ox0 = holder.offsetLeft, oy0 = holder.offsetTop; // wrap-content → canvas translation
     this.state.zoom = zoom;
-    this.applyCanvasSize();
+    this.applyCanvasSize(); // may clamp the scroll; restored explicitly below
     const scale = this.displayScale();
-    wrap.scrollLeft = cx * (scale / prevScale) - (anchorEvent ? this.overlayPos(anchorEvent).x : wrap.clientWidth / 2);
-    wrap.scrollTop = cy * (scale / prevScale) - (anchorEvent ? this.overlayPos(anchorEvent).y : wrap.clientHeight / 2);
+    // keep the anchor's content point at the same viewport position:
+    // ox0 + ax − sl = ox1 + ax·(scale/prevScale) − sl'  →  sl' = ax·(ratio − 1) + sl + (ox1 − ox0)
+    // (the holder offset term covers margin:auto centering collapsing to 0 when the
+    // canvas outgrows the pane, and restoring when it fits again)
+    const ratio = scale / prevScale;
+    wrap.scrollLeft = ax * (ratio - 1) + sl + (holder.offsetLeft - ox0);
+    wrap.scrollTop = ay * (ratio - 1) + st + (holder.offsetTop - oy0);
     this.el.zoomBadge.hidden = false;
     this.el.zoomBadge.textContent = `×${zoom.toFixed(1)}  (double-click to reset)`;
     this.drawOverlay();
@@ -847,9 +857,12 @@ export class InspectorUI {
       }
       this.applyCanvasSize();
       this.el.zoomBadge.hidden = this.state.zoom === 1;
-      if (dimsChanged) {
-        // a mode switch resizes the canvas; center it so the transition is deterministic
-        // (same-dims renders — frame scrubs, anchor edits — keep the scroll exactly)
+      // center on MODE switches only — bitmap dims also change by a few px when the
+      // scrollbar appears/disappears (wrap resize → new render target), and recentering
+      // on that would discard the zoom-at-point scroll set by setZoom moments earlier
+      const modeChanged = this._renderedMode !== req.params.mode;
+      this._renderedMode = req.params.mode;
+      if (modeChanged) {
         const wrap = this.el.imageWrap;
         wrap.scrollLeft = Math.max(0, (this.el.canvas.clientWidth - wrap.clientWidth) / 2);
         wrap.scrollTop = Math.max(0, (this.el.canvas.clientHeight - wrap.clientHeight) / 2);

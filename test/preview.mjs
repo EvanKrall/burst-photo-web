@@ -1,7 +1,10 @@
 // Preview renderer checks: CFA→RGB correctness, white-balance gain, gamma lift.
+// Plus: end-to-end flashraw development of our own merged DNG output.
 // Run: node test/preview.mjs
 
 import { renderPreview } from '../src/preview.js';
+import { writeDNG } from '../src/dng_writer.js';
+import { FlashRaw } from 'flashraw';
 
 let failures = 0;
 const check = (label, ok, detail = '') => {
@@ -64,6 +67,29 @@ check('BGGR CFA mapped correctly (slot 3 is R, slot 0 is B)', R4 > 180 && B4 < R
 
 // ---- alpha opaque ----
 check('alpha = 255', p1.rgba[3] === 255);
+
+// ---- end-to-end: flashraw develops OUR merged DNG (the browser preview path) ----
+// Red scene merged Bayer → DNG (with AsShotNeutral from WB) → flashraw rgba8.
+const dngBytes = writeDNG(mkScene(meta.cfa, 400, 100, 60), meta);
+const rawDev = await FlashRaw.open(dngBytes);
+try {
+  const asShot = rawDev.metadata.dng?.asShotNeutral;
+  check('AsShotNeutral tag present in written DNG',
+    Array.isArray(asShot) && asShot.length === 3,
+    asShot ? JSON.stringify(asShot.map((v) => +v.toFixed(3))) : String(asShot));
+  check('AsShotNeutral ≈ [0.48, 1, 0.53]',
+    asShot && Math.abs(asShot[0] - 1 / 2.1) < 1e-3 && Math.abs(asShot[1] - 1) < 1e-3 && Math.abs(asShot[2] - 1 / 1.9) < 1e-3,
+    asShot ? JSON.stringify(asShot.map((v) => +v.toFixed(3))) : String(asShot));
+
+  const dev = await rawDev.decode({ backend: 'cpu', output: 'rgba8', demosaic: 'half-size', whiteBalance: 'as-shot' });
+  check('developed dimensions (half-size)', dev.width === W / 2 && dev.height === H / 2, `${dev.width}x${dev.height}`);
+  const [dr, dg, db] = [dev.data[0], dev.data[1], dev.data[2]];
+  check('developed red scene is red-dominant (demosaic+WB+matrix)', dr > dg * 1.5 && dr > db * 1.5,
+    `rgb(${dr},${dg},${db})`);
+  check('developed red scene is bright (sRGB-encoded)', dr > 170, `R=${dr}`);
+} finally {
+  rawDev.close();
+}
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

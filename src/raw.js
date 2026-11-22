@@ -102,6 +102,27 @@ export async function decodeDNG(arrayBuffer, name = 'frame') {
   }
 }
 
+// Fully develop a DNG (e.g. our own merged output) with flashraw and return display-ready
+// RGBA. This gives the preview the whole development chain — demosaic, white balance,
+// color matrix, sRGB encoding, orientation — instead of the crude block render in
+// preview.js. `demosaic: 'half-size'` (2×2 block per channel) keeps it fast.
+export async function developPreview(dngBytes) {
+  const { FlashRaw } = await loadFlashraw();
+  const raw = await FlashRaw.open(dngBytes);
+  try {
+    const frame = await raw.decode({
+      backend: 'cpu',
+      output: 'rgba8',
+      demosaic: 'half-size',
+      whiteBalance: 'as-shot',
+    });
+    const data = frame.zeroCopy ? frame.detach() : frame.data;
+    return { width: frame.width, height: frame.height, rgba: data };
+  } finally {
+    raw.close();
+  }
+}
+
 // ---- extraction helpers (also used by test/roundtrip.mjs) ------------------
 
 // BlackLevel { rows, cols, samples, values[], mean } is anchored at sensor-buffer (0,0);

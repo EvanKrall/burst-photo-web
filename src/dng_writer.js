@@ -81,6 +81,15 @@ export function writeDNG(pixels, meta) {
     entries.push(new IFDEntry(50721, SRATIONAL, meta.colorMatrix.map((v) => rational(Math.round(v * 10000), 10000)))); // ColorMatrix1
     entries.push(new IFDEntry(50778, SHORT, [21]));      // CalibrationIlluminant1: D65
   }
+
+  // AsShotNeutral from the camera's as-shot multipliers [R, G, B, G2] (G = 1):
+  // invert and normalize so the largest component is 1 (DNG convention).
+  if (Array.isArray(meta.whiteBalance) && meta.whiteBalance.length === 4) {
+    const [wr, , wbB] = meta.whiteBalance;
+    const neutral = [1 / wr, 1, 1 / wbB];
+    const max = Math.max(...neutral);
+    entries.push(new IFDEntry(50728, RATIONAL, neutral.map((v) => rational(Math.round((v / max) * 100000), 100000))));
+  }
   entries.sort((a, b) => a.tag - b.tag);
 
   // ---- layout ----

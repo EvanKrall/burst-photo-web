@@ -3,7 +3,7 @@
 import { initGPU, GPUContext } from './gpu.js';
 import { WGSL } from './kernels.js';
 import { alignMergeSpatial } from './pipeline.js';
-import { decodeDNG } from './raw.js';
+import { decodeDNG, developPreview } from './raw.js';
 import { writeDNG } from './dng_writer.js';
 import { renderPreview } from './preview.js';
 
@@ -121,6 +121,7 @@ processBtn.addEventListener('click', async () => {
       whiteLevel: refMeta.whiteLevel,
       cfa: refMeta.cfa,
       colorMatrix: refMeta.colorMatrix,
+      whiteBalance: refMeta.whiteBalance,
       orientation: refMeta.orientation,
       make: refMeta.make,
       model: refMeta.model,
@@ -130,16 +131,27 @@ processBtn.addEventListener('click', async () => {
     downloadLink.download = refMeta.name.replace(/\.dng$/i, '') + '_merged_web.dng';
 
     // ---- quick preview: 2x2 CFA blocks -> RGB ----
-    // ---- preview: 2x2-block CFA->RGB + white balance + gamma (see src/preview.js) ----
-    const preview = renderPreview(result.pixels, refMeta);
-    canvas.width = preview.width;
-    canvas.height = preview.height;
-    const ctx = canvas.getContext('2d');
-    ctx.putImageData(new ImageData(preview.rgba, preview.width, preview.height), 0, 0);
+    // ---- preview: let flashraw fully develop our merged DNG (demosaic + WB + color
+    // matrix + sRGB). Falls back to the fast block render if that fails. ----
+    try {
+      const dev = await developPreview(dngBytes);
+      canvas.width = dev.width;
+      canvas.height = dev.height;
+      const ctx = canvas.getContext('2d');
+      ctx.putImageData(new ImageData(dev.rgba, dev.width, dev.height), 0, 0);
+      log('Preview: flashraw-developed from the merged DNG (demosaic, WB, color matrix, sRGB).');
+    } catch (err) {
+      log(`flashraw preview failed (${err.message}) — using fast block preview instead.`);
+      const preview = renderPreview(result.pixels, refMeta);
+      canvas.width = preview.width;
+      canvas.height = preview.height;
+      const ctx = canvas.getContext('2d');
+      ctx.putImageData(new ImageData(preview.rgba, preview.width, preview.height), 0, 0);
+    }
 
     resultEl.style.display = 'block';
     setProgress(1, 'done');
-    log('Done. Preview is a fast 2x2-block render with white balance + gamma; download the DNG for full quality.');
+    log('Done. Preview: flashraw-developed; download the DNG for full quality in your RAW converter.');
   } catch (err) {
     log(`ERROR: ${err.message}`);
     console.error(err);

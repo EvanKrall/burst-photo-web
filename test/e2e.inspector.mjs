@@ -338,6 +338,9 @@ try {
   // merge the remaining 3 frames → preview + download
   await page.click('#inspMerge');
   await page.waitForSelector('#previewPane:not([hidden])', { timeout: 120000 });
+  // the inspection session's alignment grids must be reused (same reference + same params)
+  const reuseLogged = await page.evaluate(() => document.getElementById('log').textContent.includes('reusing the inspection alignment'));
+  check('merge reuses the inspection alignment', reuseLogged);
   const merged = await page.evaluate(() => ({
     canvasW: document.getElementById('canvas').width,
     href: document.getElementById('download').href.startsWith('blob:'),

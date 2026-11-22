@@ -256,12 +256,27 @@ async function runInspection() {
     setProgress(1, 'inspection ready');
     log(`Inspection ready: ${session.tileInfo.w}×${session.tileInfo.h} tile grid, shared alignment scale ${session.alignmentScale} l0-px. Background calibration measures the shared difference scale.`);
     showPane('inspector'); // pane must be visible before the UI measures its canvas area
+    // Capture the inspection alignment for the merge: the session's retained per-frame
+    // grids are plain CPU arrays (Int32Array texels) — exactly what alignTextureEx —
+    // and thus the merge pipeline — would compute again. Only reusable while the merge
+    // parameters still match what the inspection used.
+    const alignmentReuse = () => {
+      const tileSize = Number(document.getElementById('tileSize').value);
+      const searchDistance = Number(document.getElementById('searchDistance').value);
+      if (tileSize !== options.tileSize || searchDistance !== options.searchDistance) {
+        return { reason: `alignment parameters changed since the inspection (tile=${tileSize}, search=${searchDistance} vs ${options.tileSize}/${options.searchDistance})` };
+      }
+      const grids = new Map(session.frameList.map((f) =>
+        [f.idx, f.isRef ? null : { texels: f.texels, w: session.tileInfo.w, h: session.tileInfo.h }]));
+      return { refCaptureIdx: options.refIdx, grids };
+    };
     inspector = new InspectorUI(session, {
       onMerge: (includedIndices) => {
+        const reuse = alignmentReuse();
         // release the inspection view (and its GPU memory) before the merge reloads everything
         disposeInspector();
         showPane('progress');
-        processBurst(includedIndices);
+        processBurst(includedIndices, reuse);
       },
     });
     window.__inspector = inspector; // exposed for tests
@@ -291,7 +306,7 @@ async function runInspection() {
 // ---- processing ----
 // frameIndices: optional list of indices into loadedFrames to merge (inspector selection);
 // defaults to every loaded frame. The reference is the center frame of the merged list.
-async function processBurst(frameIndices = null) {
+async function processBurst(frameIndices = null, reuse = null) {
   if (decoding || processing || loadedFrames.length < 2) return;
   const indices = frameIndices && frameIndices.length >= 2
     ? frameIndices
@@ -312,9 +327,13 @@ async function processBurst(frameIndices = null) {
     const gpu = new GPUContext(device);
     gpu.setShaderModule(WGSL);
 
-    // reference = center frame of the merged list (matches Burst Photo default)
-    const refIdx = Math.floor(indices.length / 2);
-    const ordered = [indices[refIdx], ...indices.slice(0, refIdx), ...indices.slice(refIdx + 1)];
+    // reference frame: when merging from the inspection view, keep the inspection's
+    // reference (the alignment grids are relative to it, and it's the frame the user
+    // reviewed). Otherwise the center frame of the merged list (Burst Photo default).
+    const pinnedRef = reuse && indices.includes(reuse.refCaptureIdx) ? reuse.refCaptureIdx : -1;
+    const refPos = pinnedRef >= 0 ? indices.indexOf(pinnedRef) : Math.floor(indices.length / 2);
+    const refIdxCapture = indices[refPos];
+    const ordered = [indices[refPos], ...indices.slice(0, refPos), ...indices.slice(refPos + 1)];
     const frames = ordered.map((i) => loadedFrames[i]);
 
     const options = {
@@ -322,7 +341,21 @@ async function processBurst(frameIndices = null) {
       searchDistance: Number(document.getElementById('searchDistance').value),
       noiseReduction: Number(document.getElementById('noiseReduction').value),
     };
-    log(`Aligning & merging ${frames.length} frames (spatial domain, tile=${options.tileSize}, search=${options.searchDistance}, noise=${options.noiseReduction})…`);
+    // validate the reuse offer (grid presence is guaranteed — the inspection aligned
+    // every frame — but stay defensive)
+    let prealigned = null;
+    if (reuse) {
+      if (reuse.reason) {
+        log(`Not reusing the inspection alignment: ${reuse.reason} — aligning from scratch.`);
+      } else if (refIdxCapture !== reuse.refCaptureIdx) {
+        log('Not reusing the inspection alignment: its reference frame is excluded from the merge — aligning from scratch.');
+      } else {
+        prealigned = ordered.map((ci) => reuse.grids.get(ci) ?? null);
+        if (prealigned.slice(1).some((g) => !g)) prealigned = null;
+      }
+    }
+    log(`${prealigned ? 'Merging' : 'Aligning & merging'} ${frames.length} frames (spatial domain, tile=${options.tileSize}, search=${options.searchDistance}, noise=${options.noiseReduction})${prealigned ? ' — reusing the inspection alignment' : ''}…`);
+    if (prealigned) log(`reference: frame ${String(refIdxCapture).padStart(2, '0')} (inspection reference) — the per-frame pyramid search is skipped.`);
 
     const result = await alignMergeSpatial(gpu, frames, options, (p) => {
       const inner = p.total > 1 ? p.frame / p.total : 1;

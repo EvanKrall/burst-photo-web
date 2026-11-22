@@ -230,6 +230,33 @@ try {
       t7.diffAfter = nb(await session.renderFrame(1, { mode: 'difference', ...common }));
       t7.warpedAfter = nb(await session.renderFrame(1, { mode: 'warped', ...common }));
     }
+
+    // T8: merging with an inspection session's retained alignment grids must produce
+    // pixel-identical output to a full align+merge — the grids are the exact texels
+    // alignTextureEx computes, so reuse must only skip the pyramid search
+    const t8 = {};
+    {
+      const frames8 = [mkFrame(0, 0), mkFrame(2, 1), mkFrame(-1, 2)];
+      const r8full = await alignMergeSpatial(gpu, frames8, opts, null);
+      const session8 = await performInspection(gpu, frames8,
+        { tileSize: opts.tileSize, searchDistance: opts.searchDistance, refIdx: 0 }, null);
+      const prealigned = frames8.map((_, i) => {
+        const f = session8.frameList.find((fr) => fr.idx === i);
+        return f && !f.isRef ? { texels: f.texels, w: session8.tileInfo.w, h: session8.tileInfo.h } : null;
+      });
+      const t0 = performance.now();
+      const r8reuse = await alignMergeSpatial(gpu, frames8, { ...opts, prealigned }, null);
+      t8.reuseMs = performance.now() - t0;
+      let maxDelta = 0;
+      for (let i = 0; i < r8full.pixels.length; i++) {
+        maxDelta = Math.max(maxDelta, Math.abs(r8full.pixels[i] - r8reuse.pixels[i]));
+      }
+      t8.identical = r8full.pixels.length === r8reuse.pixels.length && maxDelta === 0;
+      t8.maxDelta = maxDelta;
+      // grid dims must line up with what the merge derives (otherwise warpWithGrid throws)
+      t8.gridDims = `${session8.tileInfo.w}×${session8.tileInfo.h}`;
+      session8.destroy();
+    }
     session.destroy();
 
     return {
@@ -243,6 +270,7 @@ try {
       t5: { matchNoisy, matchShifted, medianDiffMean: session.medianDiffMean, calibrated: session.calibrated,
             progress: session.calibrationProgress },
       t6: renders,
+      t8,
       t7,
     };
   });
@@ -284,6 +312,8 @@ try {
       check(`T6 render ${mode}: non-trivial output`, r.nonBlackRatio > 0.1,
         `nonBlack=${(r.nonBlackRatio * 100).toFixed(0)}% — ${r.info.slice(0, 80)}`);
     }
+    check('T8 reuse-merge output is pixel-identical to a full align+merge', out.t8.identical,
+      `maxDelta=${out.t8.maxDelta} grid=${out.t8.gridDims} reuseMs=${out.t8.reuseMs?.toFixed(0)}`);
     check('T7 ref difference render produces output', out.t7.refDiff > 0.1,
       `nonBlack=${(out.t7.refDiff * 100).toFixed(0)}%`);
     for (const k of ['refAfter', 'origAfter', 'diffAfter', 'warpedAfter']) {

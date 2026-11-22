@@ -101,16 +101,28 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
   const noiseSd = await sumToScalar(gpu, noiseDiff) / (noiseDiff.w * noiseDiff.h);
 
   // ---- comparison frames ----------------------------------------------------
+  // optional precomputed alignment grids (e.g. from an inspection session): entries
+  // parallel to frames, {texels, w, h} or null; entry 0 (the reference) is null. The
+  // texels are exactly what alignTextureEx produces, so the warp below yields
+  // bit-identical results — only the pyramid search is skipped.
+  const prealigned = options.prealigned ?? null;
   const tAlign = performance.now();
   for (let f = 1; f < nImages; f++) {
-    onProgress?.({ stage: 'align+merge', frame: f, total: nImages });
     const comp = frames[f];
     const compPadded = await prepareFrame(gpu, comp, padX, padY);
 
-    const alignedPadded = alignTexture(gpu, refPyramid, compPadded, {
-      nLevels, downscaleFactorArray, tileSizeArray,
-      compBlackMean: Math.max(0, comp.blackLevel.reduce((a, b) => a + b, 0) / comp.blackLevel.length),
-    });
+    let alignedPadded, preBuf = null;
+    const pre = prealigned ? prealigned[f] : null;
+    if (pre) {
+      preBuf = gpu.storageFromData(`align-reuse-${f}`, pre.texels);
+      alignedPadded = warpWithGrid(gpu, refPyramid, compPadded, new Plane(preBuf, pre.w, pre.h),
+        { downscaleFactorArray, tileSizeArray });
+    } else {
+      alignedPadded = alignTexture(gpu, refPyramid, compPadded, {
+        nLevels, downscaleFactorArray, tileSizeArray,
+        compBlackMean: Math.max(0, comp.blackLevel.reduce((a, b) => a + b, 0) / comp.blackLevel.length),
+      });
+    }
     const aligned = crop(gpu, alignedPadded, padX, padY);
 
     // robust spatial merge (port of robust_merge)
@@ -129,6 +141,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
                      compBlurred.buf, texDiff.buf, weight.buf, weightUp.buf, merged.buf]) {
       b.destroy();
     }
+    if (preBuf) preBuf.destroy();
 
     // Wait for the GPU to actually finish frame f before starting frame f+1.
     // dispatch() only enqueues work, and a setTimeout(0) yield (~1-4 ms) is far
@@ -140,6 +153,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
     // the browser hundreds of ms of idle main thread to paint between updates.
     // Cost: the GPU idles a few ms per frame boundary — negligible here.
     await device.queue.onSubmittedWorkDone();
+    onProgress?.({ stage: pre ? 'warp+merge' : 'align+merge', frame: f, total: nImages });
   }
 
   // add reference frame contribution — the last work unit, so report the
@@ -298,16 +312,10 @@ export function alignTextureEx(gpu, refPyramid, compPadded, { nLevels, downscale
   // Metal passes half_tile_size = (downscale==2 ? 1 : downscale) * tile_size,
   // i.e. tile_size for Bayer, and the level-0 tile grid (computed on the
   // half-resolution pyramid base).
-  const halfTile = downscaleFactorArray[0] === 2 ? 1 * tileSizeArray[0] : downscaleFactorArray[0] * tileSizeArray[0];
-  const refBase = refPyramid[0];
-  const nTilesX = Math.floor(refBase.w / (tileSizeArray[0] / 2)) - 1;
-  const nTilesY = Math.floor(refBase.h / (tileSizeArray[0] / 2)) - 1;
+  const nTilesX = Math.floor(refPyramid[0].w / (tileSizeArray[0] / 2)) - 1;
+  const nTilesY = Math.floor(refPyramid[0].h / (tileSizeArray[0] / 2)) - 1;
 
-  const out = new Plane(gpu.zeros('warped', compPadded.size), compPadded.w, compPadded.h);
-  gpu.dispatch('warp_bayer',
-    [{ buffer: compPadded.buf }, { buffer: out.buf }, { buffer: prevAlign.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32'],
-       [compPadded.w, compPadded.h, halfTile, nTilesX, nTilesY, downscaleFactorArray[0]]) }], groups(compPadded.w, compPadded.h));
+  const out = warpWithGrid(gpu, refPyramid, compPadded, prevAlign, { downscaleFactorArray, tileSizeArray });
 
   for (const p of compPyramid.slice(1)) p.buf.destroy();
   return {
@@ -320,6 +328,31 @@ export function alignTextureEx(gpu, refPyramid, compPadded, { nLevels, downscale
       downscale: downscaleFactorArray[0],
     },
   };
+}
+
+/**
+ * Warp a padded comparison frame with an existing level-0 alignment grid (a Plane of
+ * nTilesX×nTilesY vec2<i32> shifts — e.g. the freshly computed grid of alignTextureEx,
+ * or a grid uploaded from an inspection session's retained texels). Shared by the
+ * align+merge pipeline and the alignment-reuse path so the warp is defined in one place.
+ */
+function warpWithGrid(gpu, refPyramid, compPadded, align, { downscaleFactorArray, tileSizeArray }) {
+  // Metal passes half_tile_size = (downscale==2 ? 1 : downscale) * tile_size,
+  // i.e. tile_size for Bayer, and the level-0 tile grid (computed on the
+  // half-resolution pyramid base).
+  const halfTile = downscaleFactorArray[0] === 2 ? 1 * tileSizeArray[0] : downscaleFactorArray[0] * tileSizeArray[0];
+  const nTilesX = Math.floor(refPyramid[0].w / (tileSizeArray[0] / 2)) - 1;
+  const nTilesY = Math.floor(refPyramid[0].h / (tileSizeArray[0] / 2)) - 1;
+  if (align.w !== nTilesX || align.h !== nTilesY) {
+    throw new Error(`alignment grid ${align.w}×${align.h} does not match the derived tile grid ${nTilesX}×${nTilesY}`);
+  }
+
+  const out = new Plane(gpu.zeros('warped', compPadded.size), compPadded.w, compPadded.h);
+  gpu.dispatch('warp_bayer',
+    [{ buffer: compPadded.buf }, { buffer: out.buf }, { buffer: align.buf },
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32'],
+       [compPadded.w, compPadded.h, halfTile, nTilesX, nTilesY, downscaleFactorArray[0]]) }], groups(compPadded.w, compPadded.h));
+  return out;
 }
 
 // Plain align_texture(): only the warped texture is needed; the alignment grid is discarded.

@@ -190,10 +190,16 @@ Every frame is scored inside the subject area — mean brightness-matched
 difference and alignment-field variation (mean per-tile deviation from the
 region's median shift, the same metric the Swift app uses for automatic
 frame rejection) — and the list sorts by either. Frames excluded via their
-checkbox are left out of the merge; the merge picks its own reference from
-the surviving frames. A background calibration pass (pooled values, per-
-frame brightness matches, thumbnail data) warms the caches and measures the
-shared difference scale.
+checkbox are left out of the merge. Merging from the inspector keeps the
+inspection's reference frame and feeds the inspection's per-frame
+alignment grids straight into the merge — the per-frame pyramid search is
+skipped entirely (verified bit-identical against a full align+merge).
+Changing the tile size / search distance between inspection and merge, or
+excluding the inspection reference, falls back to a full re-alignment.
+A plain "Process burst" (no inspection) still aligns from scratch and picks
+the center of the frame list as its reference (Burst Photo default). A
+background calibration pass (pooled values, per-frame brightness matches,
+thumbnail data) warms the caches and measures the shared difference scale.
 
 The default subject area is the camera's autofocus area when the reference
 frame's maker notes carry it: a WASM exiftool (@uswriting/exiftool — the

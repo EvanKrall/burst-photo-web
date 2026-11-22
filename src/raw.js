@@ -18,6 +18,7 @@
 //     sensor values — exactly what prepare_bayer expects (it subtracts black level on GPU).
 
 const FLASHRAW_SOURCES = [
+  'flashraw',                                      // bare specifier: Node.js / bundlers
   '/node_modules/flashraw/dist/browser.js',        // local npm install, served by server.mjs
   'https://cdn.jsdelivr.net/npm/flashraw/+esm',    // jsDelivr ESM build (best-effort)
   'https://esm.sh/flashraw',                       // esm.sh fallback (best-effort)
@@ -45,7 +46,9 @@ async function loadFlashraw() {
   return modulePromise;
 }
 
-export async function decodeDNG(arrayBuffer, name = 'frame') {
+export async function decodeRaw(arrayBuffer, name = 'frame') {
+  // Works for every format flashraw supports (DNG, NEF, ARW, CR3, RAF, …) —
+  // decoding is format-agnostic; flashraw normalizes metadata into the same shape.
   const { FlashRaw } = await loadFlashraw();
 
   const raw = await FlashRaw.open(arrayBuffer);
@@ -80,6 +83,7 @@ export async function decodeDNG(arrayBuffer, name = 'frame') {
     const blackLevel = extractBlack4(frame.blackLevel, frame.origin, name);
     const whiteLevel = Math.max(...(frame.whiteLevel?.length ? frame.whiteLevel : [65535]));
     const whiteBalance = frame.whiteBalance ?? meta.whiteBalance ?? null;
+    const whiteBalanceApplied = Boolean(frame.whiteBalanceApplied ?? meta.whiteBalanceApplied ?? false);
     const cfa = cfaToNumbers(frame.cfa, name);
     const colorMatrix = pickColorMatrix(frame.colorMatrices ?? meta.colorMatrices, name);
 
@@ -93,6 +97,8 @@ export async function decodeDNG(arrayBuffer, name = 'frame') {
       cfa,                  // [c0,c1,c2,c3] row-major, 0=R 1=G 2=B
       colorMatrix,          // number[9] | null  (XYZ→camera, illuminant D65 preferred)
       whiteBalance,         // [R, G, B, G2] as-shot multipliers normalized to G=1, or null
+      whiteBalanceApplied,  // true when samples are ALREADY white-balanced (sNEF, Sony
+                            // lossless YCbCr): never apply WB gains to these
       orientation: meta.orientation ?? 1,
       make: meta.camera?.make ?? null,
       model: meta.camera?.model ?? null,
@@ -178,3 +184,6 @@ export function pickColorMatrix(matrices, name) {
   }
   return pick.values.slice(0, 9).map(Number);
 }
+
+// Deprecated alias — decoding is not DNG-specific.
+export const decodeDNG = decodeRaw;

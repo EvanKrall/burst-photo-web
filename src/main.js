@@ -3,7 +3,7 @@
 import { initGPU, GPUContext } from './gpu.js';
 import { WGSL } from './kernels.js';
 import { alignMergeSpatial } from './pipeline.js';
-import { decodeDNG, developPreview } from './raw.js';
+import { decodeRaw, developPreview } from './raw.js';
 import { writeDNG } from './dng_writer.js';
 import { renderPreview } from './preview.js';
 
@@ -38,10 +38,25 @@ drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
 drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('hover'); loadFiles(e.dataTransfer.files); });
 fileInput.addEventListener('change', () => loadFiles(fileInput.files));
 
+// Extensions flashraw is documented to decode (docs/formats.md); DNG subsumes
+// most phone RAWs. Decoding itself is format-agnostic — see src/raw.js.
+const RAW_EXTENSIONS = new Set([
+  'dng', 'nef', 'nrw', 'arw', 'srf', 'sr2', 'arq', 'cr2', 'cr3', 'crw', 'raf',
+  'rwl', 'rw2', 'orf', 'ori', 'pef', 'srw', 'mrw', 'iiq', 'mos', '3fr', 'fff',
+  'kdc', 'dcr', 'dcs', 'erf', 'mef', 'x3f', 'ari',
+]);
+
 async function loadFiles(fileList) {
-  const files = [...fileList].filter((f) => /\.(dng|DNG)$/.test(f.name));
+  const files = [...fileList].filter((f) => RAW_EXTENSIONS.has(f.name.split('.').pop().toLowerCase()));
+  const rejected = [...fileList].filter((f) => !RAW_EXTENSIONS.has(f.name.split('.').pop().toLowerCase()));
+  if (rejected.length) log(`Skipped ${rejected.length} unsupported file(s): ${rejected.map((f) => f.name).join(', ')}`);
   if (files.length < 2) {
-    log('Please provide at least 2 DNG files from the same burst.');
+    log('Please provide at least 2 RAW files from the same burst (e.g. .dng, .nef, .arw, .cr3).');
+    return;
+  }
+  const exts = new Set(files.map((f) => f.name.split('.').pop().toLowerCase()));
+  if (exts.size > 1) {
+    log(`Mixed formats in one burst are not supported (${[...exts].join(', ')}). Use files from a single camera/format.`);
     return;
   }
   logEl.textContent = '';
@@ -54,7 +69,7 @@ async function loadFiles(fileList) {
       const f = files[i];
       setProgress((i / files.length) * 0.5, `decoding ${i + 1}/${files.length}: ${f.name}`);
       const t = performance.now();
-      const frame = await decodeDNG(await f.arrayBuffer(), f.name);
+      const frame = await decodeRaw(await f.arrayBuffer(), f.name);
       const ms = Math.round(performance.now() - t);
 
       if (loadedFrames.length > 0) {
@@ -138,6 +153,7 @@ processBtn.addEventListener('click', async () => {
       cfa: refMeta.cfa,
       colorMatrix: refMeta.colorMatrix,
       whiteBalance: refMeta.whiteBalance,
+      whiteBalanceApplied: refMeta.whiteBalanceApplied,
       orientation: refMeta.orientation,
       make: refMeta.make,
       model: refMeta.model,

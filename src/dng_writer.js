@@ -117,12 +117,17 @@ export function writeDNG(pixels, meta) {
     entries.push(new IFDEntry(50721, SRATIONAL, meta.colorMatrix.map((v) => rational(Math.round(v * 10000), 10000)))); // ColorMatrix1
     entries.push(new IFDEntry(50778, SHORT, [21]));      // CalibrationIlluminant1: D65
   }
-  if (Array.isArray(meta.whiteBalance) && meta.whiteBalance.length === 4) {
-    // AsShotNeutral: invert as-shot multipliers, normalize so max = 1
+  if (Array.isArray(meta.whiteBalance) && meta.whiteBalance.length === 4 && !meta.whiteBalanceApplied) {
+    // AsShotNeutral: invert as-shot multipliers, normalize so max = 1.
+    // Skipped when the camera already applied WB to the samples (sNEF, Sony
+    // lossless YCbCr): we then write an explicit [1, 1, 1] below so developers
+    // do not balance the samples a second time.
     const [wr, , wb] = meta.whiteBalance;
     const neutral = [1 / wr, 1, 1 / wb];
     const max = Math.max(...neutral);
     entries.push(new IFDEntry(50728, RATIONAL, neutral.map((v) => rational(Math.round((v / max) * 100000), 100000))));
+  } else if (meta.whiteBalanceApplied) {
+    entries.push(new IFDEntry(50728, RATIONAL, [rational(100000, 100000), rational(100000, 100000), rational(100000, 100000)]));
   }
 
   // ---- EXIF sub-IFD ----
@@ -151,10 +156,12 @@ export function writeDNG(pixels, meta) {
   const ifd0Off = 8;
   const ifd0Size = 2 + entries.length * 12 + 4;
   const ifd0ValOff = ifd0Off + ifd0Size;
-  const exifIfdOff = hasExif ? align2(ifd0ValOff + valuesSize(entries)) : ifd0ValOff;
+  // region chain flows through every region unconditionally (exifSize / exif
+  // values size are simply 0 when there is no EXIF IFD)
+  const exifIfdOff = align2(ifd0ValOff + valuesSize(entries));
   const exifSize = hasExif ? 2 + exifEntries.length * 12 + 4 : 0;
   const exifValOff = align2(exifIfdOff + exifSize);
-  const pixelOffset = hasExif ? align2(exifValOff + valuesSize(exifEntries)) : align2(exifValOff);
+  const pixelOffset = align2(exifValOff + valuesSize(exifEntries));
   const fileLength = pixelOffset + width * height * 2;
 
   const buf = new ArrayBuffer(fileLength);

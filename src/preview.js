@@ -29,8 +29,11 @@ export function renderPreview(pixels, meta, targetWidth = 1600) {
   });
   const white = Math.max(1, meta.whiteLevel || 65535);
 
-  // per-slot gain from as-shot white balance (G channels stay at 1)
-  const wb = Array.isArray(meta.whiteBalance) && meta.whiteBalance.length === 4 ? meta.whiteBalance : null;
+  // per-slot gain from as-shot white balance (G channels stay at 1).
+  // Samples that are ALREADY white-balanced (sNEF, Sony lossless YCbCr) must not
+  // be balanced again — treat as unit gains.
+  const wb = !meta.whiteBalanceApplied && Array.isArray(meta.whiteBalance) && meta.whiteBalance.length === 4
+    ? meta.whiteBalance : null;
   const slotGain = cfa.map((color) => (wb ? (color === 0 ? wb[0] : color === 2 ? wb[2] : 1) : 1));
 
   const OFF = [[0, 0], [1, 0], [0, 1], [1, 1]];

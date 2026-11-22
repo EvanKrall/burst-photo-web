@@ -44,8 +44,18 @@ npm start         # zero-dependency static server on http://localhost:8080
 ```
 
 Open http://localhost:8080 in a WebGPU-capable browser (Chrome/Edge 113+,
-Safari 26, Firefox with WebGPU). Drop ≥2 DNGs from the same burst, press
+Safari 26, Firefox with WebGPU). Drop ≥2 RAW files from the same burst, press
 *Process burst*, get a preview and a 16-bit uncompressed Bayer DNG.
+
+**Input formats**: everything flashraw decodes — DNG, NEF/NRW, ARW/SR2/SRF/ARQ,
+CR2/CR3/CRW, RAF, RW2/RWL, ORF, PEF, SRW, MRW, IIQ, 3FR/FFF, KDC/DCR/DCS, ERF,
+MEF, X3F, ARI (no Adobe DNG Converter needed; one uniform format per burst).
+flashraw normalizes metadata (per-camera black levels — including ones measured
+from masked areas — white level, CFA, color matrices) into the same shape the
+pipeline consumes, so the GPU stage is format-agnostic. X-Trans (Fujifilm RAF)
+and monochrome sensors are still out of PoC scope. Some formats (Nikon sNEF,
+Sony lossless YCbCr) have white balance already applied by the camera; that
+flag is honored end-to-end so WB is never applied twice.
 
 The preview is **fully developed by flashraw from our own merged DNG** — the
 same bytes you download — so it shows exactly what a RAW converter will see:

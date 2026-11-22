@@ -55,12 +55,15 @@ export async function performInspection(gpu, frames, options, onProgress) {
   });
 
   // ---- align every comparison frame, retaining only the small alignment grids
+  const alignStart = performance.now();
+  const perFrameMs = []; // prepare + pyramid + coarse-to-fine search + grid readback, per frame
   for (let i = 0; i < frames.length; i++) {
-    onProgress?.({ stage: 'align', frame: i, total: frames.length });
     if (i === refIdx) {
       session.addFrame({ idx: i, name: frames[i].name, isRef: true, texels: null, stats: null });
       continue;
     }
+    onProgress?.({ stage: 'align', frame: i, total: frames.length });
+    const t0 = performance.now();
     const compPadded = await prepareFrame(gpu, frames[i], padX, padY);
     const { warped, alignment } = alignTextureEx(gpu, refPyramid, compPadded, {
       nLevels, downscaleFactorArray, tileSizeArray,
@@ -73,11 +76,18 @@ export async function performInspection(gpu, frames, options, onProgress) {
     compPadded.buf.destroy();
     warped.buf.destroy();
     session.addFrame({ idx: i, name: frames[i].name, isRef: false, texels, stats: alignmentStats(texels) });
+    perFrameMs.push(performance.now() - t0); // readBack resolves only after the GPU finished
+    onProgress?.({ stage: 'align', frame: i + 1, total: frames.length, ms: perFrameMs[perFrameMs.length - 1] });
     // let the GPU drain so progress updates stay visible (see pipeline.js for the rationale)
     await gpu.device.queue.onSubmittedWorkDone();
   }
-
+  const alignTimings = {
+    totalMs: performance.now() - alignStart,
+    perFrameMs,
+    frames: frames.length - 1,
+  };
   for (const p of refPyramid) p.buf.destroy();
+  session.timings = alignTimings; // exposed for the UI log
   return session;
 }
 

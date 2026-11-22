@@ -201,7 +201,7 @@ async function loadFiles(fileList) {
       log(`${f.name}: ${frame.width}x${frame.height}, black=${JSON.stringify(frame.blackLevel)}, white=${frame.whiteLevel} (${ms} ms)`);
       await yieldToUI();
     }
-    log(`Loaded ${loadedFrames.length} frames. Reference frame: ${loadedFrames[Math.floor(loadedFrames.length / 2)].name} (burst center)`);
+    log(`Loaded ${loadedFrames.length} frames in ${(decodeMsTotal / 1000).toFixed(2)} s (${(decodeMsTotal / files.length).toFixed(0)} ms/frame average). Reference frame: ${loadedFrames[Math.floor(loadedFrames.length / 2)].name} (burst center)`);
     recordTiming('decodePerShot', decodeMsTotal / files.length);
     setProgress(stageProgress('decode', 1), 'decoding complete');
   } catch (err) {
@@ -251,10 +251,12 @@ async function runInspection() {
     log(`Aligning ${loadedFrames.length} frames for inspection (tile=${options.tileSize}, search=${options.searchDistance})…`);
     const session = await performInspection(gpu, loadedFrames, options, (p) => {
       setProgress(p.total > 1 ? p.frame / p.total : 1, `aligning ${p.frame}/${p.total}`);
-      if (p.frame % 5 === 0 || p.frame === p.total) log(`aligned ${p.frame}/${p.total}`);
+      if (p.ms !== undefined) log(`aligned ${p.frame}/${p.total} — ${p.ms.toFixed(0)} ms`);
     });
     setProgress(1, 'inspection ready');
-    log(`Inspection ready: ${session.tileInfo.w}×${session.tileInfo.h} tile grid, shared alignment scale ${session.alignmentScale} l0-px. Background calibration measures the shared difference scale.`);
+    const at = session.timings;
+    const avg = at.frames > 0 ? at.totalMs / at.frames : 0;
+    log(`Inspection ready: ${session.tileInfo.w}×${session.tileInfo.h} tile grid, shared alignment scale ${session.alignmentScale} l0-px — alignment took ${(at.totalMs / 1000).toFixed(2)} s (${avg.toFixed(0)} ms/frame). Background calibration measures the shared difference scale.`);
     showPane('inspector'); // pane must be visible before the UI measures its canvas area
     // Capture the inspection alignment for the merge: the session's retained per-frame
     // grids are plain CPU arrays (Int32Array texels) — exactly what alignTextureEx —
@@ -308,6 +310,7 @@ async function runInspection() {
 // defaults to every loaded frame. The reference is the center frame of the merged list.
 async function processBurst(frameIndices = null, reuse = null) {
   if (decoding || processing || loadedFrames.length < 2) return;
+  const tAll = performance.now(); // wall time of the whole merge (for the final summary)
   const indices = frameIndices && frameIndices.length >= 2
     ? frameIndices
     : loadedFrames.map((_, i) => i);
@@ -360,7 +363,8 @@ async function processBurst(frameIndices = null, reuse = null) {
     const result = await alignMergeSpatial(gpu, frames, options, (p) => {
       const inner = p.total > 1 ? p.frame / p.total : 1;
       setProgress(stageProgress('alignMerge', inner), `${p.stage} ${p.frame}/${p.total}`);
-      log(`${p.stage} ${p.frame}/${p.total}`);
+      const t = p.timings;
+      log(`${p.stage} ${p.frame}/${p.total}${t ? ` — prepare ${t.prepareMs.toFixed(0)} ms, ${t.reused ? 'warp' : 'align'} ${t.alignMs.toFixed(0)} ms, merge ${t.mergeMs.toFixed(0)} ms` : ''}`);
     });
 
     log(`align+merge: ${result.timings.alignMergeMs.toFixed(0)} ms ` +
@@ -407,6 +411,7 @@ async function processBurst(frameIndices = null, reuse = null) {
       exif,
     });
     recordTiming('dng', performance.now() - tDng);
+    log(`DNG written in ${(performance.now() - tDng).toFixed(0)} ms (${(dngBytes.length / 1e6).toFixed(1)} MB)`);
     const blob = new Blob([dngBytes], { type: 'image/x-adobe-dng' });
     downloadLink.href = URL.createObjectURL(blob);
     downloadLink.download = refMeta.name.replace(/\.dng$/i, '') + '_merged_web.dng';
@@ -419,12 +424,13 @@ async function processBurst(frameIndices = null, reuse = null) {
     try {
       const tPrev = performance.now();
       const dev = await developPreview(dngBytes);
-      recordTiming('preview', performance.now() - tPrev);
+      const prevMs = performance.now() - tPrev;
+      recordTiming('preview', prevMs);
       canvas.width = dev.width;
       canvas.height = dev.height;
       const ctx = canvas.getContext('2d');
       ctx.putImageData(new ImageData(dev.rgba, dev.width, dev.height), 0, 0);
-      log('Preview: flashraw-developed from the merged DNG (demosaic, WB, color matrix, sRGB).');
+      log(`Preview: flashraw-developed from the merged DNG in ${(prevMs / 1000).toFixed(2)} s (demosaic, WB, color matrix, sRGB).`);
     } catch (err) {
       log(`flashraw preview failed (${err.message}) — using fast block preview instead.`);
       const preview = renderPreview(result.pixels, refMeta);
@@ -436,7 +442,7 @@ async function processBurst(frameIndices = null, reuse = null) {
 
     showPane('preview');
     setProgress(stageProgress('preview', 1), 'done');
-    log('Done. Preview: flashraw-developed; download the DNG for full quality in your RAW converter.');
+    log(`Done in ${((performance.now() - tAll) / 1000).toFixed(2)} s (wall). Preview: flashraw-developed; download the DNG for full quality in your RAW converter.`);
   } catch (err) {
     log(`ERROR: ${err.message}`);
     console.error(err);

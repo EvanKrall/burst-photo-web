@@ -107,9 +107,13 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
   // bit-identical results — only the pyramid search is skipped.
   const prealigned = options.prealigned ?? null;
   const tAlign = performance.now();
+  const frameTimings = []; // per-frame wall-clock of the three sub-stages (GPU-drained)
   for (let f = 1; f < nImages; f++) {
+    const tf0 = performance.now();
     const comp = frames[f];
     const compPadded = await prepareFrame(gpu, comp, padX, padY);
+    await device.queue.onSubmittedWorkDone();
+    const tPrepared = performance.now();
 
     let alignedPadded, preBuf = null;
     const pre = prealigned ? prealigned[f] : null;
@@ -124,6 +128,8 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
       });
     }
     const aligned = crop(gpu, alignedPadded, padX, padY);
+    await device.queue.onSubmittedWorkDone();
+    const tAligned = performance.now();
 
     // robust spatial merge (port of robust_merge)
     const compBlurred = blurPlane(gpu, aligned, blurKernelSize, mosaic);
@@ -153,7 +159,16 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
     // the browser hundreds of ms of idle main thread to paint between updates.
     // Cost: the GPU idles a few ms per frame boundary — negligible here.
     await device.queue.onSubmittedWorkDone();
-    onProgress?.({ stage: pre ? 'warp+merge' : 'align+merge', frame: f, total: nImages });
+    const timings = {
+      frame: f,
+      reused: !!pre,
+      prepareMs: tPrepared - tf0,       // upload + Bayer→linear kernels, incl. GPU drain
+      alignMs: tAligned - tPrepared,    // pyramid search (or grid warp on reuse) + crop
+      mergeMs: performance.now() - tAligned, // blur, robust weights, accumulate
+      totalMs: performance.now() - tf0,
+    };
+    frameTimings.push(timings);
+    onProgress?.({ stage: pre ? 'warp+merge' : 'align+merge', frame: f, total: nImages, timings });
   }
 
   // add reference frame contribution — the last work unit, so report the
@@ -183,6 +198,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
     alignMergeMs: tMerge - tAlign,
     finalizeMs: performance.now() - tMerge,
     totalMs: performance.now() - t0,
+    frames: frameTimings,
   };
   return { width: W, height: H, pixels, timings, noiseSd, robustness };
 }

@@ -19,9 +19,13 @@ The flashraw integration and the DNG writer are verified headlessly
 (`npm test`: synthetic Bayer frame → DNG → flashraw decode → exact pixel +
 metadata round-trip, 20 checks). The WGSL kernels are verified on a real GPU
 (`npm run smoke`: opens a Chrome window, compiles the shader module, then runs
-the full pipeline twice on synthetic bursts on your actual GPU — identical
-frames must round-trip exactly, and a (2,1)-shifted comparison frame must be
-motion-rejected). Both suites currently pass.
+the full pipeline plus the alignment inspection on synthetic bursts on your
+actual GPU — identical frames must round-trip exactly, a (2,1)-shifted
+comparison frame must be motion-rejected, the inspection must recover the
+known shift, and ROI scoring must separate rigid frames from a moved subject).
+`npm run e2e` additionally drives the real page (decode → inspector → frame
+selection → merge → preview) with a synthetic DNG burst. All suites currently
+pass.
 
 ## flashraw integration notes (verified against v0.4.0 source)
 
@@ -81,9 +85,23 @@ npm start         # zero-dependency static server on http://localhost:8080
 ```
 
 Open http://localhost:8080 in a WebGPU-capable browser (Chrome/Edge 113+,
-Safari 26, Firefox with WebGPU). Drop ≥2 RAW files from the same burst and
-merging starts automatically — you get a preview and a 16-bit uncompressed
-Bayer DNG. Adjust the settings and press *Process burst* to re-run.
+Safari 26, Firefox with WebGPU). Drop ≥2 RAW files from the same burst. With
+**Inspect alignment first** checked (the default — a port of Burst Photo's
+alignment inspector), the burst is aligned without merging and an inspection
+view opens: per-frame alignment fields (RGB-axes or optical-flow colors),
+warped/original/reference frames, signed difference images, and automatic
+per-frame scoring (mean brightness-matched difference and alignment-field
+variation inside a draggable subject area). Uncheck bad frames, then press
+*Merge* — the full pipeline runs on the checked frames only and you get a
+preview and a 16-bit uncompressed Bayer DNG. Uncheck the box to merge
+automatically instead; *Process burst* re-runs with the current selection.
+
+The inspector's controls mirror the Swift app: click sets an **anchor point**
+(alignment/flow views show the field relative to it, difference fits
+brightness locally and robustly around it), drag marks the **subject area**
+(drag a rectangle on the image), the wheel zooms, ↑/↓ scrub frames,
+←/→ switches modes, space toggles a frame's checkbox, esc clears the
+subject area.
 
 **Input formats**: everything flashraw decodes — DNG, NEF/NRW, ARW/SR2/SRF/ARQ,
 CR2/CR3/CRW, RAF, RW2/RWL, ORF, PEF, SRW, MRW, IIQ, 3FR/FFF, KDC/DCR/DCS, ERF,
@@ -123,15 +141,56 @@ node test/roundtrip.mjs
 ## Architecture
 
 ```
-index.html            UI: drop zone, settings, progress, canvas preview, download
-src/main.js           orchestration: load → decode → pipeline → preview/DNG
+index.html            UI: drop zone, settings, progress, inspector, canvas preview, download
+src/main.js           orchestration: load → decode → inspection → pipeline → preview/DNG
 src/raw.js            flashraw wrapper: DNG → {Bayer u16, black/white level, CFA, color matrix}
 src/pipeline.js       port of merge/spatial.swift + align/align.swift orchestration
 src/kernels.js        WGSL compute kernels (ports of the Metal kernels)
+src/inspect.js        alignment inspection session (port of inspect/inspect.swift):
+                      align-only pass, per-frame alignment grids, on-demand warped/
+                      difference rendering, background calibration, ROI scoring
+src/viz.js            CPU visualization + scoring math (port of viz/visualize.swift):
+                      alignment-field renderer, robust brightness matching, ROI metrics
+src/inspector.js      inspection UI (port of inspect/AlignmentInspectorView.swift):
+                      frame list with scores/checkboxes, zoomable image with anchor
+                      point + subject-area selection, render queue, merge bar
 src/gpu.js            WebGPU helpers (buffers, dispatch, readback, uniform packing)
 src/dng_writer.js     minimal 16-bit uncompressed Bayer DNG writer (phone-DNG style)
 server.mjs            zero-dependency static server
 ```
+
+### Alignment inspector
+
+The pre-merge inspection view ("Inspect alignment first") ports the Swift
+branch's alignment inspector (`docs/plan-alignment-inspection.md` upstream):
+after decoding, every comparison frame is aligned against the reference with
+exactly the merge pipeline's parameters, keeping only the small per-tile
+alignment grids. The session then renders, on demand and per selected frame:
+
+- **Alignment / Flow** — the per-tile shift field as color (R=+x/G=+y, or
+  hue=direction/brightness=magnitude), saturating at a burst-wide shared
+  scale (2 × median mean |shift|), optionally relative to the anchor tile.
+- **Difference** — signed, brightness-matched difference to the reference
+  (warped brighter = red, darker = blue), white-pointed at a shared median
+  scale × user gain; the brightness match is a global least-squares fit, or
+  an inlier-maximizing robust fit around the anchor.
+- **Original / Warped / Reference** — tonemapped raw previews (the original
+  optionally shifted through the anchor's tile so it stays registered).
+
+Every frame is scored inside the subject area — mean brightness-matched
+difference and alignment-field variation (mean per-tile deviation from the
+region's median shift, the same metric the Swift app uses for automatic
+frame rejection) — and the list sorts by either. Frames excluded via their
+checkbox are left out of the merge; the merge picks its own reference from
+the surviving frames. A background calibration pass (pooled values, per-
+frame brightness matches, thumbnail data) warms the caches and measures the
+shared difference scale.
+
+Not ported from the Swift branch: reading the reference frame's autofocus
+area from Nikon maker notes (flashraw does not expose AF metadata — the
+subject area defaults to the centered half of the frame), and stack
+record files (a browser can't write next to the download; re-open the
+original RAWs instead).
 
 Images are handled as **storage buffers** (`array<f32>` planes), not textures:
 the Metal code reads/writes texels only via explicit `.read()/.write()` (no
@@ -220,6 +279,16 @@ exposure bracketing, the frequency-domain ("higher quality") merge, hot-pixel
 suppression, exposure correction, and performance-optimized variants of ported
 kernels.
 
+The alignment inspector adds 5 more kernels, ported or adapted from the Swift
+visualize branch (`viz/visualize.metal`): `diff_f32` (abs-difference plane for
+render-time statistics = `abs_difference`), `diff_rgba8` (signed difference →
+red/blue tonemap, pooled readback = `signed_difference_rgba8`), `gray_rgba8`
+(tonemapped gray preview = `gray_to_rgba8`), plus `area_pool_f32` (fractional-box
+resampling, the GPU counterpart of the Swift CPU `downsample_values`). The
+alignment-field color mapping (`render_alignment_color`) runs on the CPU in
+`src/viz.js` — the tile grids are tiny, and the texels are already read back
+for scoring.
+
 ## PoC simplifications (vs Burst Photo)
 
 1. Spatial merge only (the app's "Fast" mode). The frequency-domain merge
@@ -231,6 +300,10 @@ kernels.
    (correct but slower; costs ~25× full-tile evaluations per level).
 4. No hot-pixel suppression, no exposure correction, no bracketing.
 5. Out-of-bounds reads clamp to edge (Metal returns 0) — border pixels only.
+   Unlike Metal's exact `dispatchThreads`, WebGPU always launches whole
+   workgroups, so every kernel guards its invocations against the intended
+   grid (without the guards, extra invocations corrupt neighboring rows' —
+   discovered by the inspector's tile-cost readbacks).
 6. Output DNG is a minimal phone-style single-IFD Bayer DNG: resolution,
    bit-depth, CFA, black/white level, color matrix, AsShotNeutral, orientation,
    and an EXIF sub-IFD with burst-adjusted capture parameters (ExposureTime =

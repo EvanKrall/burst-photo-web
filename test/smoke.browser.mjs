@@ -193,9 +193,9 @@ try {
     const matchShifted = session.matchCache.get(1);
 
     // T6: render the shifted frame in each mode end-to-end (warped / difference / original)
-    // — frame 1, whose alignment field is non-trivial (the identical frame's flow field is legitimately all-black)
+    // — frame 1, whose alignment field is non-trivial (the identical frame's field is legitimately all-black)
     const renders = {};
-    for (const mode of ['alignment', 'flow', 'difference', 'original', 'warped', 'reference']) {
+    for (const mode of ['alignment', 'difference', 'original', 'warped', 'reference']) {
       const r = await session.renderFrame(1, {
         mode, alignmentScale: session.alignmentScale, outWidth: 64, outHeight: 64,
         diffGain: 4, diffWhiteOverride: null, matchExposure: true,

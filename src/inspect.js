@@ -415,25 +415,21 @@ export class InspectionSession {
   async renderFrame(idx, params) {
     const f = this.frame(idx);
     switch (params.mode) {
-      case 'alignment':
-      case 'flow': {
+      case 'alignment': {
+        // per-tile shift field as optical-flow colors: hue = shift direction,
+        // brightness = shift magnitude (the reference frame's zero field is uniform black)
         const texels = f.isRef
           ? new Int32Array(this.tileInfo.w * this.tileInfo.h * 2)
           : f.texels;
         const bitmap = renderAlignmentField(texels, this.tileInfo.w, this.tileInfo.h, {
-          mode: params.mode === 'flow' ? 'flow' : 'rgb',
           scale: params.alignmentScale,
           offsetX: params.offsetX || 0,
           offsetY: params.offsetY || 0,
         });
         if (f.isRef) {
-          const legend = params.mode === 'alignment' ? 'uniform gray' : 'uniform black';
-          return { bitmap, info: `reference frame · alignment is zero by definition (${legend})` };
+          return { bitmap, info: 'reference frame · alignment is zero by definition (uniform black)' };
         }
-        const legend = params.mode === 'alignment'
-          ? 'zero shift = gray, red = +x, green = +y'
-          : 'hue = direction, brightness = magnitude';
-        let info = `alignment colors saturate at ${params.alignmentScale} level-0 px (${params.alignmentScale * this.tileInfo.downscale} sensor px), shared by all frames · ${legend}`;
+        let info = `alignment colors saturate at ${params.alignmentScale} level-0 px (${params.alignmentScale * this.tileInfo.downscale} sensor px), shared by all frames · hue = direction, brightness = magnitude`;
         if ((params.offsetX || 0) !== 0 || (params.offsetY || 0) !== 0) info += ' · RELATIVE to anchor';
         return { bitmap, info };
       }

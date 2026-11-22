@@ -304,6 +304,29 @@ try {
   const escState = await page.evaluate(() => window.__inspector.state.roi);
   check('escape clears the subject area', escState === null);
 
+  // "Set subject from autofocus point": hidden until an AF area exists (the synthetic
+  // DNGs have none — applyAfAreaRoi(null) has run by now), revealed when one is supplied,
+  // and clicking it applies the area as a user edit (roiTouched, Clear subject appears)
+  const afHidden = await page.evaluate(() => document.getElementById('inspSetAfRoi').hidden);
+  check('AF-subject button hidden without AF metadata', afHidden === true);
+  await page.evaluate(() => window.__inspector.applyAfAreaRoi({ x0: 0.3, y0: 0.3, x1: 0.6, y1: 0.6 }));
+  const afShown = await page.evaluate(() => ({
+    hidden: document.getElementById('inspSetAfRoi').hidden,
+    anchorStillManual: window.__inspector.state.anchorManual,
+  }));
+  check('AF-subject button appears once an AF area exists', afShown.hidden === false);
+  await page.click('#inspSetAfRoi');
+  await new Promise((r) => setTimeout(r, 500));
+  const afApplied = await page.evaluate(() => {
+    const s = window.__inspector.state;
+    return { roi: s.roi, touched: s.roiTouched, clearBtn: !document.getElementById('inspClearRoi').hidden };
+  });
+  check('AF-subject button applies the detected area',
+    afApplied.touched && afApplied.clearBtn
+    && Math.abs(afApplied.roi.x0 - 0.3) < 1e-9 && Math.abs(afApplied.roi.y0 - 0.3) < 1e-9
+    && Math.abs(afApplied.roi.x1 - 0.6) < 1e-9 && Math.abs(afApplied.roi.y1 - 0.6) < 1e-9,
+    `roi=${JSON.stringify(afApplied.roi)}`);
+
   // merge the remaining 3 frames → preview + download
   await page.click('#inspMerge');
   await page.waitForSelector('#previewPane:not([hidden])', { timeout: 120000 });

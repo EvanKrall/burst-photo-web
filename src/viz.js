@@ -42,13 +42,12 @@ export function alignmentStats(texels) {
  * `offset` (level-0 px) is subtracted from every tile shift BEFORE the color mapping,
  * so the anchored tile becomes zero (port of the kernel's offset parameter).
  *
- * Color modes:
- *  - 'rgb':  R = +x shift, G = +y shift, zero shift = 50% gray
- *  - 'flow': hue = shift direction, brightness = shift magnitude (optical-flow wheel)
+ * Color mapping is the optical-flow wheel: hue = shift direction, brightness = shift
+ * magnitude. A zero field (the reference frame) renders uniform black.
  *
  * scale: level-0 px shift mapped to full saturation. Returns {rgba: Uint8ClampedArray, width, height}.
  */
-export function renderAlignmentField(texels, width, height, { mode = 'rgb', scale = 8, offsetX = 0, offsetY = 0 }) {
+export function renderAlignmentField(texels, width, height, { scale = 8, offsetX = 0, offsetY = 0 }) {
   const rgba = new Uint8ClampedArray(width * height * 4);
   const s = Math.max(scale, 1e-6);
   for (let y = 0; y < height; y++) {
@@ -57,27 +56,21 @@ export function renderAlignmentField(texels, width, height, { mode = 'rgb', scal
       const dx = texels[i] - offsetX;
       const dy = texels[i + 1] - offsetY;
       const o = (y * width + x) * 4;
-      if (mode === 'rgb') {
-        rgba[o] = 255 * clamp01(0.5 + 0.5 * dx / s);
-        rgba[o + 1] = 255 * clamp01(0.5 + 0.5 * dy / s);
-        rgba[o + 2] = 0;
-      } else {
-        // HSV flow: hue = shift direction, brightness = shift magnitude
-        const hue = (Math.atan2(dy, dx) + Math.PI) / (2 * Math.PI);
-        const mag = clamp01(Math.hypot(dx, dy) / s);
-        const k = Math.floor(hue * 6);
-        const f = hue * 6 - k;
-        let r, g, b;
-        if (k < 0.5) { r = 1; g = f; b = 0; }
-        else if (k < 1.5) { r = 1 - f; g = 1; b = 0; }
-        else if (k < 2.5) { r = 0; g = 1; b = f; }
-        else if (k < 3.5) { r = 0; g = 1 - f; b = 1; }
-        else if (k < 4.5) { r = f; g = 0; b = 1; }
-        else { r = 1; g = 0; b = 1 - f; }
-        rgba[o] = 255 * r * mag;
-        rgba[o + 1] = 255 * g * mag;
-        rgba[o + 2] = 255 * b * mag;
-      }
+      // HSV flow: hue = shift direction, brightness = shift magnitude
+      const hue = (Math.atan2(dy, dx) + Math.PI) / (2 * Math.PI);
+      const mag = clamp01(Math.hypot(dx, dy) / s);
+      const k = Math.floor(hue * 6);
+      const f = hue * 6 - k;
+      let r, g, b;
+      if (k < 0.5) { r = 1; g = f; b = 0; }
+      else if (k < 1.5) { r = 1 - f; g = 1; b = 0; }
+      else if (k < 2.5) { r = 0; g = 1; b = f; }
+      else if (k < 3.5) { r = 0; g = 1 - f; b = 1; }
+      else if (k < 4.5) { r = f; g = 0; b = 1; }
+      else { r = 1; g = 0; b = 1 - f; }
+      rgba[o] = 255 * r * mag;
+      rgba[o + 1] = 255 * g * mag;
+      rgba[o + 2] = 255 * b * mag;
       rgba[o + 3] = 255;
     }
   }

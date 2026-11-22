@@ -94,7 +94,7 @@
     .insp-ctl { display: flex; align-items: center; gap: 0.45rem; font-size: 0.78rem; color: #8a929c; }
     .insp-ctl input[type="range"] { width: 110px; }
     .insp-ctl input[type="checkbox"] { accent-color: #4a9eff; }
-    #inspClearAnchor, #inspClearRoi { font-size: 0.75rem; padding: 0.2rem 0.6rem; cursor: pointer; }
+    #inspClearAnchor, #inspSetAfRoi, #inspClearRoi { font-size: 0.75rem; padding: 0.2rem 0.6rem; cursor: pointer; }
     #inspMain { flex: 1; display: flex; min-height: 0; }
     #inspSidebar {
       flex: 0 0 252px; display: flex; flex-direction: column; min-height: 0;
@@ -261,7 +261,6 @@
         <div id="inspToolbar">
           <div class="seg" id="inspModes">
             <button data-mode="alignment">Alignment</button>
-            <button data-mode="flow">Flow</button>
             <button data-mode="difference">Difference</button>
             <button data-mode="original">Original</button>
             <button data-mode="warped">Warped</button>
@@ -279,6 +278,7 @@
             <input type="range" id="inspDiffGain" min="0.5" max="20" step="0.5" value="4">
           </span>
           <button id="inspClearAnchor" hidden>Clear anchor</button>
+          <button id="inspSetAfRoi" hidden title="Use the autofocus area read from the reference frame's maker notes as the subject area">Set subject from autofocus point</button>
           <button id="inspClearRoi" hidden>Clear subject</button>
         </div>
         <div id="inspMain">

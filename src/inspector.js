@@ -10,15 +10,16 @@
 // - The alignment color scale and the difference white point are SHARED ACROSS ALL FRAMES of a
 //   burst (median-based, computed in the session's calibration pass), so images are comparable
 //   between frames. Until calibration completes, difference renders fall back to per-frame scale.
-// - Clicking the image sets an ANCHOR POINT: all alignment/flow visualizations (main view and
-//   thumbnails) subtract the shift of the anchored tile of their own frame, so the anchor reads
+// - Clicking the image sets an ANCHOR POINT: the alignment visualization (main view and
+//   thumbnails) subtracts the shift of the anchored tile of its own frame, so the anchor reads
 //   zero and the field shows the deformation RELATIVE to it. With an anchor set, the Difference
 //   mode fits the brightness match locally and robustly around it instead of globally.
 // - Dragging on the image marks the SUBJECT AREA (region of interest). Both scores in the frame
 //   list — mean brightness-matched difference and alignment-field variation — are computed inside
 //   it; the list can be sorted by either. The default subject area comes from the reference
 //   frame's autofocus-area metadata when available (src/af_area.js, WASM exiftool — the Swift
-//   app reads the same maker-note tags natively), otherwise it is the centered half of the frame.
+//   app reads the same maker-note tags natively), otherwise it is the centered half of the frame;
+//   the toolbar's "Set subject from autofocus point" re-applies the detected area at any time.
 // - The frame list supports checking/unchecking images (excluded from the merge), and multi-
 //   selection with cmd-click (toggle one) and shift-click (toggle a range).
 // - Arrow keys scrub through frames IN LOCKSTEP with the preview: while a render is in flight,
@@ -26,8 +27,8 @@
 
 import { renderAlignmentField, grayBitmapFromValues, roiIsDegenerate, normalizeRoi } from './viz.js';
 
-const MODES = ['alignment', 'flow', 'difference', 'original', 'warped', 'reference'];
-const MODE_IS_ALIGNMENT = (m) => m === 'alignment' || m === 'flow';
+const MODES = ['alignment', 'difference', 'original', 'warped', 'reference'];
+const MODE_IS_ALIGNMENT = (m) => m === 'alignment';
 const MODE_KEEP_THUMBS = (m) => m === 'original' || m === 'reference'; // thumbnails keep previous mode
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
@@ -58,6 +59,7 @@ export class InspectorUI {
       diffGainLabel: $('inspDiffGainLabel'),
       diffGain: $('inspDiffGain'),
       clearAnchor: $('inspClearAnchor'),
+      setAfRoi: $('inspSetAfRoi'),
       clearRoi: $('inspClearRoi'),
       colHead: $('inspColHead'),
       frameList: $('inspFrameList'),
@@ -79,7 +81,7 @@ export class InspectorUI {
       selection: new Set(),
       lastClicked: 0,
       excluded: new Set(),
-      mode: 'alignment',
+      mode: 'alignment', // per-tile shift field: hue = shift direction, brightness = magnitude
       alignShared: true,
       alignManualScale: 32,
       diffShared: true,
@@ -109,6 +111,7 @@ export class InspectorUI {
 
     this.rows = new Map(); // idx -> row element
     this.thumbs = new Map(); // idx -> ImageBitmap-ish {rgba, width, height}
+    this.afRoi = null; // AF-area-derived subject area from the reference frame (via main.js)
 
     this.buildFrameList();
     this.bindEvents();
@@ -309,6 +312,8 @@ export class InspectorUI {
       this.rebuildOrder();
     });
     el.clearRoi.addEventListener('click', () => this.setRoi(null));
+    // re-apply the AF-area-derived subject area (hidden until detection reports one)
+    el.setAfRoi.addEventListener('click', () => { if (this.afRoi) this.setRoi(this.afRoi); });
 
     // frame list rows: click = select, cmd-click = toggle in selection, shift-click = range,
     // checkbox = include/exclude (multi-selection follows)
@@ -432,9 +437,12 @@ export class InspectorUI {
   /**
    * Apply an AF-area-derived subject area (arrives asynchronously — WASM exiftool run on
    * the reference frame). Ignored when the user has already edited the area themselves
-   * or the view is disposed. Returns true when the area was applied.
+   * or the view is disposed. The detected area is remembered either way, so the
+   * "Set subject from autofocus point" button can (re-)apply it later.
    */
   applyAfAreaRoi(roi) {
+    this.afRoi = roi;
+    this.el.setAfRoi.hidden = !roi;
     if (!roi || this.aborted) return false;
     if (this.state.roiTouched) return false;
     this.state.roi = roi;
@@ -818,7 +826,7 @@ export class InspectorUI {
         let ox = 0, oy = 0;
         if (s.anchor && !f.isRef) [ox, oy] = this.session.texelOffset(f.idx, s.anchor.tileX, s.anchor.tileY);
         bitmap = renderAlignmentField(texels, this.session.tileInfo.w, this.session.tileInfo.h, {
-          mode: s.mode === 'flow' ? 'flow' : 'rgb', scale, offsetX: ox, offsetY: oy,
+          scale, offsetX: ox, offsetY: oy,
         });
       } else if (s.mode === 'difference') {
         const data = this.session.frameData.get(f.idx);

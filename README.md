@@ -88,8 +88,9 @@ Open http://localhost:8080 in a WebGPU-capable browser (Chrome/Edge 113+,
 Safari 26, Firefox with WebGPU). Drop ≥2 RAW files from the same burst. With
 **Inspect alignment first** checked (the default — a port of Burst Photo's
 alignment inspector), the burst is aligned without merging and an inspection
-view opens: per-frame alignment fields (RGB-axes or optical-flow colors),
-warped/original/reference frames, signed difference images, and automatic
+view opens: per-frame alignment fields (optical-flow colors: hue = shift
+direction, brightness = magnitude), warped/original/reference frames, signed
+difference images, and automatic
 per-frame scoring (mean brightness-matched difference and alignment-field
 variation inside a draggable subject area). Uncheck bad frames, then press
 *Merge* — the full pipeline runs on the checked frames only and you get a
@@ -175,8 +176,8 @@ after decoding, every comparison frame is aligned against the reference with
 exactly the merge pipeline's parameters, keeping only the small per-tile
 alignment grids. The session then renders, on demand and per selected frame:
 
-- **Alignment / Flow** — the per-tile shift field as color (R=+x/G=+y, or
-  hue=direction/brightness=magnitude), saturating at a burst-wide shared
+- **Alignment** — the per-tile shift field as optical-flow color (hue =
+  direction, brightness = magnitude), saturating at a burst-wide shared
   scale (2 × median mean |shift|), optionally relative to the anchor tile.
 - **Difference** — signed, brightness-matched difference to the reference
   (warped brighter = red, darker = blue), white-pointed at a shared median
@@ -202,7 +203,9 @@ Height` from the reference frame while the burst is still aligning, and the
 result becomes the subject area unless you have already drawn one. The
 interpreter (~25 MB) downloads lazily on the first inspection and is run on
 the reference frame only (~0.5 s). Verified for Nikon Z bodies; other makes
-fall back to the centered half of the frame.
+fall back to the centered half of the frame. The toolbar's *Set subject from
+autofocus point* button (next to *Clear subject*) re-applies the detected
+area at any time.
 
 Not ported from the Swift branch: stack record files (a browser can't write
 next to the download; re-open the original RAWs instead). The Swift branch's

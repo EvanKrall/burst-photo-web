@@ -353,37 +353,47 @@ try {
       warpStages: (text.match(/warp\+merge \d+\//g) || []).length,
       alignStages: (text.match(/align\+merge \d+\//g) || []).length,
       mergedActive: document.querySelector('#inspModes button[data-mode="merged"]')?.classList.contains('active'),
-      openPreviewShown: !document.getElementById('inspOpenPreview').hidden,
+      downloadShown: !document.getElementById('inspDownloadDng').hidden,
     };
   });
   check('merge reuses the inspection alignment (warp stages, no align stages)',
     reuseLogged.intent && reuseLogged.warpStages >= 1 && reuseLogged.alignStages === 0,
     JSON.stringify(reuseLogged));
-  check('after the merge, the inspector shows the Merged view + preview button',
-    reuseLogged.mergedActive && reuseLogged.openPreviewShown, JSON.stringify(reuseLogged));
+  check('after the merge, the inspector shows the Merged view + Download DNG button',
+    reuseLogged.mergedActive && reuseLogged.downloadShown, JSON.stringify(reuseLogged));
 
-  // the merged render must show real content (tonemapped, not black)
+  // the merged render must be a developed RGB image (the fixture's as-shot WB is strongly
+  // warm, so channel spread is a real signal that flashraw developed it — not a gray tonemap)
   await new Promise((r) => setTimeout(r, 1000)); // let the render pump finish
-  const mergedLit = await page.evaluate(() => {
+  const mergedView = await page.evaluate(() => {
     const c = document.getElementById('inspCanvas');
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    let lit = 0;
-    for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 24) lit++;
-    return { ratio: lit / (d.length / 4), info: document.getElementById('inspInfoLine').textContent };
+    let lit = 0, colored = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] + d[i + 1] + d[i + 2] > 24) lit++;
+      const mx = Math.max(d[i], d[i + 1], d[i + 2]), mn = Math.min(d[i], d[i + 1], d[i + 2]);
+      if (mx - mn > 10) colored++;
+    }
+    return {
+      lit: lit / (d.length / 4),
+      colored: colored / (d.length / 4),
+      info: document.getElementById('inspInfoLine').textContent,
+    };
   });
-  check('Merged view renders non-black output', mergedLit.ratio > 0.1,
-    `lit=${(mergedLit.ratio * 100).toFixed(0)}% — ${mergedLit.info.slice(0, 80)}`);
+  check('Merged view renders non-black output', mergedView.lit > 0.1,
+    `lit=${(mergedView.lit * 100).toFixed(0)}% — ${mergedView.info.slice(0, 80)}`);
+  check('Merged view shows developed color (not a gray tonemap)', mergedView.colored > 0.02,
+    `colored=${(mergedView.colored * 100).toFixed(0)}%`);
 
-  // the merge bar's "Preview & download" opens the preview pane with the merged DNG
-  await page.click('#inspOpenPreview');
-  await page.waitForSelector('#previewPane:not([hidden])', { timeout: 30000 });
+  // the merge bar's "Download DNG" fires the app download link (blob + name already set)
   const merged = await page.evaluate(() => ({
-    canvasW: document.getElementById('canvas').width,
     href: document.getElementById('download').href.startsWith('blob:'),
     disabled: document.getElementById('download').classList.contains('disabled'),
+    name: document.getElementById('download').download,
   }));
-  check('merge produced a preview', merged.canvasW > 0, `canvas ${merged.canvasW}px`);
-  check('download link carries the merged DNG', merged.href && !merged.disabled);
+  check('download link carries the merged DNG', merged.href && !merged.disabled, JSON.stringify(merged));
+  await page.click('#inspDownloadDng');
+  await new Promise((r) => setTimeout(r, 300));
 
   check('no page errors during e2e run', pageErrors.length === 0,
     pageErrors.slice(0, 3).join(' | '));

@@ -20,8 +20,9 @@ import { packUniforms } from './gpu.js';
 import {
   alignmentStats, renderAlignmentField, alignmentVariationInRoi, normalizeRoi,
   brightnessMatchValues, robustBrightnessMatchValues, medianOfSorted,
-  downsampleValues, grayBitmapFromValues, rgbaFromPackedU32, downsampleU16,
+  downsampleValues, grayBitmapFromValues, rgbaFromPackedU32, downsampleU16, downsampleRGBA,
 } from './viz.js';
+import { developBayer } from './raw.js';
 
 const WORKGROUP = 8;
 
@@ -133,6 +134,8 @@ export class InspectionSession {
 
     this.gridBuffers = new Map(); // idx -> GPUBuffer with the alignment grid (array<vec2<i32>>)
     this.zeroGrid = null;
+    this._rgbCache = new Map();   // developed RGB photo views, key (view, frame, shift, size)
+    this._rgbCacheSize = null;    // display size the cache was built for
   }
 
   addFrame(entry) {
@@ -424,13 +427,99 @@ export class InspectionSession {
    * Port of InspectorModel.render (see AlignmentInspectorView.swift for the Swift originals
    * of the per-mode info strings).
    */
+  /**
+   * Developed-RGB photo view (Original / Warped / Reference tabs): the frame's Bayer data
+   * — or the warped plane, converted back to u16 Bayer — is developed with the whole
+   * flashraw chain (src/raw.js developBayer: demosaic, as-shot WB, color matrix, sRGB)
+   * and box-averaged to the display size. Cached per (view, frame, anchor shift, size);
+   * returns null when the develop fails so the caller can fall back to the gray view.
+   * Returns { bitmap, dx, dy } (the anchor shift applied, for the info line).
+   */
+  async developedPhotoView(mode, idx, outW, outH, anchor) {
+    const size = `${outW}x${outH}`;
+    if (this._rgbCacheSize !== size) {
+      this._rgbCache.clear();
+      this._rgbCacheSize = size;
+    }
+    let dx = 0, dy = 0;
+    const f = this.frame(idx);
+    if (mode === 'original' && anchor && !f.isRef) {
+      [dx, dy] = this.texelOffset(idx, anchor.tileX, anchor.tileY);
+    }
+    const key = (mode === 'warped' ? `w:${idx}` : `p:${idx}`) + (dx || dy ? `:${dx},${dy}` : '');
+    const hit = this._rgbCache.get(key);
+    if (hit) return hit;
+    try {
+      let frame;
+      if (mode === 'warped') {
+        frame = await this.warpedBayerU16(idx);
+      } else if (dx || dy) {
+        frame = await this.shiftedBayerU16(idx, dx, dy);
+      } else {
+        // Reference (and unshifted Original of the reference frame — same content)
+        frame = this.framesIn[mode === 'reference' ? this.refIdx : idx];
+      }
+      const dev = await developBayer(frame);
+      const entry = { bitmap: downsampleRGBA(dev.rgba, dev.width, dev.height, outW, outH), dx, dy };
+      this._rgbCache.set(key, entry);
+      return entry;
+    } catch (err) {
+      console.warn(`RGB develop failed (${mode} frame ${idx}); using the gray view`, err);
+      return null;
+    }
+  }
+
+  /**
+   * The warped candidate plane as u16 Bayer: prepare_bayer is black-level-neutral
+   * (black is only subtracted at the final convert_to_u16), so the plane holds original
+   * sensor values — a clamp to [0, whiteLevel] reconstructs a developable frame.
+   */
+  async warpedBayerU16(idx) {
+    const plane = await this.alignedPlane(idx);
+    const owned = !this.frame(idx).isRef; // the reference frame's plane is the retained ref plane
+    const data = await this.planeToBayerU16(plane, this.framesIn[idx]);
+    if (owned) plane.buf.destroy();
+    return { ...this.framesIn[idx], data, width: plane.w, height: plane.h };
+  }
+
+  /** Original (unwarped) frame shifted by a constant (dx, dy) to match the anchor. */
+  async shiftedBayerU16(idx, dx, dy) {
+    const compPadded = await prepareFrame(this.gpu, this.framesIn[idx], this.padX, this.padY);
+    const grid = this.constantGridBuffer(dx, dy);
+    const out = new Plane(this.gpu.zeros('shifted', compPadded.size), compPadded.w, compPadded.h);
+    const halfTile = this.tileInfo.downscale === 2 ? this.tileInfo.tileSize : this.tileInfo.downscale * this.tileInfo.tileSize;
+    this.gpu.dispatch('warp_bayer',
+      [{ buffer: compPadded.buf }, { buffer: out.buf }, { buffer: grid },
+       { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32'],
+         [compPadded.w, compPadded.h, halfTile, this.tileInfo.w, this.tileInfo.h, this.tileInfo.downscale]) }],
+      groups(compPadded.w, compPadded.h));
+    grid.destroy();
+    const plane = crop(this.gpu, out, this.padX, this.padY);
+    out.buf.destroy();
+    const data = await this.planeToBayerU16(plane, this.framesIn[idx]);
+    plane.buf.destroy();
+    return { ...this.framesIn[idx], data };
+  }
+
+  async planeToBayerU16(plane, src) {
+    const f32 = new Float32Array(await this.gpu.readBack(plane.buf, plane.size));
+    const white = src.whiteLevel > 0 ? src.whiteLevel : 65535;
+    const u16 = new Uint16Array(plane.w * plane.h);
+    for (let i = 0; i < u16.length; i++) {
+      const v = f32[i];
+      u16[i] = v <= 0 ? 0 : v >= white ? white : Math.round(v);
+    }
+    return u16;
+  }
+
   async renderFrame(idx, params) {
     const f = this.frame(idx);
     switch (params.mode) {
       case 'merged': {
-        // the merged result (set by the UI after an inspector merge), rendered like the
-        // other photo views: box-average to the display size, tonemap to the brightest
-        // block. Mode is burst-level, so `idx` is ignored. Cached per output size.
+        // the merged result (set by the UI after an inspector merge), developed to RGB
+        // with the whole flashraw chain — the same image the old preview pane showed.
+        // Mode is burst-level, so `idx` is ignored. Cached per output size; falls back
+        // to the gray block view when flashraw cannot develop our DNG.
         const m = this.mergedResult;
         if (!m) {
           return { bitmap: grayBitmapFromValues(new Float32Array(1), 1, 1, 1), info: 'no merged result yet' };
@@ -438,20 +527,32 @@ export class InspectionSession {
         const outW = params.outWidth, outH = params.outHeight;
         let bitmap = this._mergedCache && this._mergedCache.w === outW && this._mergedCache.h === outH
           ? this._mergedCache.bitmap : null;
+        let developed = false;
         if (!bitmap) {
-          const values = downsampleU16(m.pixels, m.width, m.height, outW, outH);
-          const black = m.blackLevel.reduce((a, b) => a + b, 0) / m.blackLevel.length;
-          let max = 0;
-          for (let i = 0; i < values.length; i++) {
-            values[i] -= black;
-            if (values[i] > max) max = values[i];
+          try {
+            const dev = await developBayer({ ...m, data: m.pixels });
+            bitmap = downsampleRGBA(dev.rgba, dev.width, dev.height, outW, outH);
+            developed = true;
+          } catch (err) {
+            console.warn('merged RGB develop failed; using the gray view', err);
           }
-          bitmap = grayBitmapFromValues(values, outW, outH, Math.max(max, 1e-6));
+          if (!bitmap) {
+            const values = downsampleU16(m.pixels, m.width, m.height, outW, outH);
+            const black = m.blackLevel.reduce((a, b) => a + b, 0) / m.blackLevel.length;
+            let max = 0;
+            for (let i = 0; i < values.length; i++) {
+              values[i] -= black;
+              if (values[i] > max) max = values[i];
+            }
+            bitmap = grayBitmapFromValues(values, outW, outH, Math.max(max, 1e-6));
+          }
           this._mergedCache = { w: outW, h: outH, bitmap };
         }
         return {
           bitmap,
-          info: `merged result of ${m.count} frames · gray, white = brightest block · DNG on the preview pane`,
+          info: developed
+            ? `merged result of ${m.count} frames · developed RGB (demosaic, WB, color matrix, sRGB) · "Download DNG" below`
+            : `merged result of ${m.count} frames · gray tonemap (flashraw develop failed) · "Download DNG" below`,
         };
       }
 
@@ -527,6 +628,22 @@ export class InspectionSession {
       case 'original':
       case 'warped':
       case 'reference': {
+        // preferred path: true RGB — the frame's Bayer data (or the warped plane,
+        // converted back to u16 Bayer) is developed with the whole flashraw chain and
+        // box-averaged to the display size, cached per (frame, view, shift, size).
+        const rgb = await this.developedPhotoView(params.mode, idx, params.outWidth, params.outHeight, params.anchor);
+        if (rgb) {
+          const DEV = 'developed RGB (demosaic, as-shot WB, color matrix, sRGB)';
+          const info = params.mode === 'reference'
+            ? `reference frame · ${DEV}`
+            : params.mode === 'warped'
+              ? `warped candidate frame · ${DEV}`
+              : (params.anchor && !f.isRef
+                  ? `original frame, shifted by (${rgb.dx}, ${rgb.dy}) l0-px to match the anchor · ${DEV}`
+                  : `original frame, exposure-equalized · ${DEV}`);
+          return { bitmap: rgb.bitmap, info };
+        }
+        // fallback: the original gray tonemap (flashraw unavailable / develop failed)
         let plane, owned, info;
         if (params.mode === 'reference') {
           plane = this.refCropped; owned = false;

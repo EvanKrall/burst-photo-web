@@ -93,9 +93,11 @@ direction, brightness = magnitude), warped/original/reference frames, signed
 difference images, and automatic
 per-frame scoring (mean brightness-matched difference and alignment-field
 variation inside a draggable subject area). Uncheck bad frames, then press
-*Merge* — the full pipeline runs on the checked frames only and you get a
-preview and a 16-bit uncompressed Bayer DNG. Uncheck the box to merge
-automatically instead; *Process burst* re-runs with the current selection.
+*Merge* — the pipeline runs on the checked frames only (reusing the
+inspection alignment) and the result appears as a developed RGB **Merged**
+view plus a 16-bit uncompressed Bayer DNG to download. Uncheck the box to
+merge automatically instead; *Process burst* re-runs with the current
+selection.
 
 The inspector's controls mirror the Swift app: click sets an **anchor point**
 (alignment/flow views show the field relative to it, difference fits
@@ -114,13 +116,16 @@ and monochrome sensors are still out of PoC scope. Some formats (Nikon sNEF,
 Sony lossless YCbCr) have white balance already applied by the camera; that
 flag is honored end-to-end so WB is never applied twice.
 
-The preview is **fully developed by flashraw from our own merged DNG** — the
-same bytes you download — so it shows exactly what a RAW converter will see:
-demosaic (half-size for speed), as-shot white balance, camera color matrix,
-sRGB encoding and orientation. (Earlier iterations used a hand-rolled
-2×2-block render; it survives in `src/preview.js` as a fallback.) The merged
-DNG carries `AsShotNeutral` derived from the camera's as-shot multipliers, so
-converters reproduce the camera's white balance instead of guessing.
+The merged result is **fully developed by flashraw from our own merged DNG** —
+the same bytes you download — so the Merged view shows exactly what a RAW
+converter will see: demosaic (half-size for speed), as-shot white balance,
+camera color matrix, sRGB encoding and orientation. The same development
+chain renders the Original/Warped/Reference photo views from each frame's
+Bayer data. (Earlier iterations used a hand-rolled 2×2-block render or gray
+tonemaps; the block render survives in `src/preview.js` as a fallback.) The
+merged DNG carries `AsShotNeutral` derived from the camera's as-shot
+multipliers, so converters reproduce the camera's white balance instead of
+guessing.
 
 Note the division of labor: HDR+ *must* align and merge on the raw mosaic
 (pre-demosaic temporal denoising is the whole point of the algorithm), but
@@ -147,8 +152,8 @@ node test/roundtrip.mjs
 ## Architecture
 
 ```
-index.html            UI: drop zone, settings, progress, inspector, canvas preview, download
-src/main.js           orchestration: load → decode → inspection → pipeline → preview/DNG
+index.html            UI: drop zone, settings, progress, inspector, download
+src/main.js           orchestration: load → decode → inspection → pipeline → DNG output
 src/raw.js            flashraw wrapper: DNG → {Bayer u16, black/white level, CFA, color matrix}
 src/pipeline.js       port of merge/spatial.swift + align/align.swift orchestration
 src/kernels.js        WGSL compute kernels (ports of the Metal kernels)
@@ -183,11 +188,13 @@ alignment grids. The session then renders, on demand and per selected frame:
   (warped brighter = red, darker = blue), white-pointed at a shared median
   scale × user gain; the brightness match is a global least-squares fit, or
   an inlier-maximizing robust fit around the anchor.
-- **Original / Warped / Reference** — tonemapped raw previews (the original
-  optionally shifted through the anchor's tile so it stays registered).
-- **Merged** (appears after merging from the inspector) — the tonemapped
-  merged result as a burst-level view; the inspection stays alive so you can
-  go back to scoring and re-merge with a different frame selection.
+- **Original / Warped / Reference** — developed RGB previews of each frame
+  (the original optionally shifted through the anchor's tile so it stays
+  registered).
+- **Merged** (appears after merging from the inspector) — the developed RGB
+  merged result as a burst-level view, with a *Download DNG* button in the
+  merge bar; the inspection stays alive so you can go back to scoring and
+  re-merge with a different frame selection.
 
 Every frame is scored inside the subject area — mean brightness-matched
 difference and alignment-field variation (mean per-tile deviation from the
@@ -198,13 +205,14 @@ inspection's reference frame and feeds the inspection's per-frame
 alignment grids straight into the merge — the per-frame pyramid search is
 skipped entirely (verified bit-identical against a full align+merge) —
 and returns to the inspection view with the result as an extra "Merged"
-view ("Preview & download" opens the DNG preview pane). The session stays
-alive, so scoring and re-merging with a different frame selection costs
-no new alignment. Changing the tile size / search distance between
+view. The session stays alive, so scoring and re-merging with a different
+frame selection costs no new alignment; the DNG downloads straight from
+the merge bar. Changing the tile size / search distance between
 inspection and merge, or excluding the inspection reference, falls back
 to a full re-alignment. A plain "Process burst" without an inspection
 view still aligns from scratch, picks the center of the frame list as its
-reference (Burst Photo default) and finishes on the preview pane. A
+reference (Burst Photo default) and finishes on the intro panel, where the
+download button lives. A
 background calibration pass (pooled values, per-frame brightness matches,
 thumbnail data) warms the caches and measures the shared difference scale.
 

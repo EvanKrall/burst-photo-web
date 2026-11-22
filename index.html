@@ -61,7 +61,6 @@
     }
     /* replaced element: max-width + max-height scale it down proportionally,
        so a landscape or portrait preview always fits without overflow */
-    #canvas { max-width: 100%; max-height: calc(100vh - 8rem); border-radius: 8px; image-rendering: auto; }
     #download {
       display: inline-block; background: #1c4e80; color: #fff;
       padding: 0.5rem 1rem; border-radius: 8px; text-decoration: none; font-weight: 600;
@@ -175,7 +174,7 @@
     #inspMergeText { font-size: 0.75rem; color: #8a929c; flex: 1; }
     #inspMerge { font-size: 0.85rem; padding: 0.35rem 1rem; cursor: pointer; }
     #inspMerge:disabled { opacity: 0.4; cursor: default; }
-    #inspOpenPreview { font-size: 0.75rem; padding: 0.3rem 0.8rem; cursor: pointer; }
+    #inspDownloadDng { font-size: 0.75rem; padding: 0.3rem 0.8rem; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -251,11 +250,6 @@
         </div>
       </section>
 
-      <section id="previewPane" hidden>
-        <canvas id="canvas"></canvas>
-        <p class="hint">Drop a new burst anywhere on this pane to process another stack.</p>
-      </section>
-
       <!-- alignment inspector: shown after decoding when "Inspect alignment first" is on.
            Structure + interaction live in src/inspector.js. -->
       <section id="inspectorPane" hidden>
@@ -309,7 +303,7 @@
         </div>
         <div id="inspMergeBar">
           <span id="inspMergeText"></span>
-          <button id="inspOpenPreview" hidden title="Open the merged DNG preview pane">Preview &amp; download</button>
+          <button id="inspDownloadDng" hidden title="Download the merged DNG">Download DNG</button>
           <button id="inspMerge" class="primary">Merge</button>
         </div>
       </section>

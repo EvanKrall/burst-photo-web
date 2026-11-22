@@ -11,24 +11,21 @@ import { WGSL } from './kernels.js';
 import { alignMergeSpatial } from './pipeline.js';
 import { performInspection } from './inspect.js';
 import { InspectorUI } from './inspector.js';
-import { decodeRaw, developPreview } from './raw.js';
+import { decodeRaw } from './raw.js';
 import { detectAfAreaRoi } from './af_area.js';
 import { writeDNG } from './dng_writer.js';
-import { renderPreview } from './preview.js';
 
 const logEl = document.getElementById('log');
 const drop = document.getElementById('drop');
 const stage = document.getElementById('stage');
 const introPane = document.getElementById('intro');
 const progressPane = document.getElementById('progressPane');
-const previewPane = document.getElementById('previewPane');
 const inspectorPane = document.getElementById('inspectorPane');
 const fileInput = document.getElementById('fileInput');
 const inspectFirst = document.getElementById('inspectFirst');
 const processBtn = document.getElementById('process');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
-const canvas = document.getElementById('canvas');
 const downloadLink = document.getElementById('download');
 
 function log(msg) {
@@ -141,7 +138,7 @@ stage.addEventListener('drop', (e) => {
 fileInput.addEventListener('change', () => loadFiles(fileInput.files));
 
 // The right pane shows exactly one of: intro / progress / inspector / preview.
-const panes = { intro: introPane, progress: progressPane, inspector: inspectorPane, preview: previewPane };
+const panes = { intro: introPane, progress: progressPane, inspector: inspectorPane };
 function showPane(name) {
   for (const key of Object.keys(panes)) panes[key].hidden = key !== name;
 }
@@ -279,7 +276,6 @@ async function runInspection() {
     };
     inspectionReuse = alignmentReuse; // also used by the "Process burst" button
     inspector = new InspectorUI(session, {
-      onOpenPreview: () => showPane('preview'),
       onMerge: async (includedIndices) => {
         const reuse = alignmentReuse();
         // the inspection view STAYS ALIVE: its grids keep enabling alignment reuse on
@@ -432,36 +428,23 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
     downloadLink.download = refMeta.name.replace(/\.dng$/i, '') + '_merged_web.dng';
     downloadLink.classList.remove('disabled');
 
-    // ---- quick preview: 2x2 CFA blocks -> RGB ----
-    // ---- preview: let flashraw fully develop our merged DNG (demosaic + WB + color
-    // matrix + sRGB). Falls back to the fast block render if that fails. ----
-    setProgress(stageProgress('preview', 0), 'developing preview');
-    try {
-      const tPrev = performance.now();
-      const dev = await developPreview(dngBytes);
-      const prevMs = performance.now() - tPrev;
-      recordTiming('preview', prevMs);
-      canvas.width = dev.width;
-      canvas.height = dev.height;
-      const ctx = canvas.getContext('2d');
-      ctx.putImageData(new ImageData(dev.rgba, dev.width, dev.height), 0, 0);
-      log(`Preview: flashraw-developed from the merged DNG in ${(prevMs / 1000).toFixed(2)} s (demosaic, WB, color matrix, sRGB).`);
-    } catch (err) {
-      log(`flashraw preview failed (${err.message}) — using fast block preview instead.`);
-      const preview = renderPreview(result.pixels, refMeta);
-      canvas.width = preview.width;
-      canvas.height = preview.height;
-      const ctx = canvas.getContext('2d');
-      ctx.putImageData(new ImageData(preview.rgba, preview.width, preview.height), 0, 0);
-    }
-
-    // hand the result to the inspection view (extra "Merged" tab) or finish on the preview
+    // hand the result to the inspection view (extra "Merged" tab) or finish on the intro
+    // panel. The developed RGB preview is no longer rendered here: the Merged view
+    // develops the DNG lazily (src/inspect.js) with the same flashraw chain.
     const payload = {
       pixels: result.pixels,
+      dngBytes,
       width: result.width,
       height: result.height,
       blackLevel: refMeta.blackLevel,
       whiteLevel: refMeta.whiteLevel,
+      cfa: refMeta.cfa,
+      colorMatrix: refMeta.colorMatrix,
+      whiteBalance: refMeta.whiteBalance,
+      whiteBalanceApplied: refMeta.whiteBalanceApplied,
+      orientation: refMeta.orientation,
+      make: refMeta.make,
+      model: refMeta.model,
       count: frames.length,
       name: refMeta.name,
       noiseSd: result.noiseSd,
@@ -471,11 +454,11 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
       inspector.setMerged(payload);
       showPane('inspector');
       setProgress(stageProgress('preview', 1), 'done');
-      log(`Merged result added to the inspector as the "Merged" view (${(payload.wallMs / 1000).toFixed(2)} s wall) — the DNG is on the preview pane.`);
+      log(`Merged result added to the inspector as the "Merged" view (${(payload.wallMs / 1000).toFixed(2)} s wall) — download the DNG from there.`);
     } else {
-      showPane('preview');
+      showPane('intro');
       setProgress(stageProgress('preview', 1), 'done');
-      log(`Done in ${((performance.now() - tAll) / 1000).toFixed(2)} s (wall). Preview: flashraw-developed; download the DNG for full quality in your RAW converter.`);
+      log(`Done in ${((performance.now() - tAll) / 1000).toFixed(2)} s (wall) — "Download merged.dng" in the panel on the left.`);
     }
     return payload;
   } catch (err) {

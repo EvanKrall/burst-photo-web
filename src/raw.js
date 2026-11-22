@@ -1,3 +1,5 @@
+import { writeDNG } from './dng_writer.js';
+
 // flashraw wrapper: DNG file → raw Bayer frame + interpretation metadata.
 //
 // API verified against flashraw v0.4.0 source (npm/src/index.d.ts, npm/README.md):
@@ -117,6 +119,18 @@ export async function decodeRaw(arrayBuffer, name = 'frame') {
   } finally {
     raw.close();
   }
+}
+
+/**
+ * Fully develop raw Bayer data with the whole flashraw chain (demosaic, as-shot white
+ * balance, color matrix, sRGB encoding) and return display-ready RGBA. `frame` is a
+ * decodeRaw-style record whose fields double as the writeDNG metadata (width, height,
+ * data, blackLevel, whiteLevel, cfa, colorMatrix, whiteBalance, …). This is how the
+ * inspector renders its photo views (Original/Warped/Reference/Merged) as true RGB.
+ */
+export async function developBayer(frame) {
+  const dng = writeDNG(frame.data, frame);
+  return developPreview(dng);
 }
 
 // Fully develop a DNG (e.g. our own merged output) with flashraw and return display-ready

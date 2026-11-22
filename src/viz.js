@@ -105,6 +105,35 @@ export function downsampleU16(pixels, width, height, outW, outH) {
   return out;
 }
 
+/**
+ * Box-average an RGBA image into an outW×outH RGBA bitmap (alpha forced opaque) — the
+ * CPU counterpart of the GPU pooled reads; used to fit flashraw-developed full-res
+ * frames (src/raw.js developBayer) into the inspector's display-size views.
+ */
+export function downsampleRGBA(rgba, width, height, outW, outH) {
+  const out = new Uint8ClampedArray(outW * outH * 4);
+  const cellW = Math.max(1, Math.floor(width / outW));
+  const cellH = Math.max(1, Math.floor(height / outH));
+  for (let oy = 0; oy < outH; oy++) {
+    const y0 = Math.min(oy * cellH, height - 1);
+    const y1 = Math.min(y0 + cellH, height);
+    for (let ox = 0; ox < outW; ox++) {
+      const x0 = Math.min(ox * cellW, width - 1);
+      const x1 = Math.min(x0 + cellW, width);
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let y = y0; y < y1; y++) {
+        let i = (y * width + x0) * 4;
+        for (let x = x0; x < x1; x++, i += 4) {
+          r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; n++;
+        }
+      }
+      const o = (oy * outW + ox) * 4;
+      out[o] = r / n; out[o + 1] = g / n; out[o + 2] = b / n; out[o + 3] = 255;
+    }
+  }
+  return { rgba: out, width: outW, height: outH };
+}
+
 // ------------------------------------------------------------------ ROI scoring
 
 /**

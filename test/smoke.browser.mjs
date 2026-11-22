@@ -65,6 +65,7 @@ try {
     const { alignMergeSpatial } = await import('/src/pipeline.js');
     const { performInspection } = await import('/src/inspect.js');
     const { alignmentVariationInRoi } = await import('/src/viz.js');
+    const { writeDNG } = await import('/src/dng_writer.js');
 
     const { adapter, device } = await initGPU();
     const gpu = new GPUContext(device);
@@ -89,7 +90,7 @@ try {
           data[y * W + x] = Math.max(0, Math.min(WHITE - 1, Math.round(BLACK[cell] + signal)));
         }
       }
-      return { width: W, height: H, data, blackLevel: BLACK, whiteLevel: WHITE, name: `synth(${dx},${dy})` };
+      return { width: W, height: H, data, blackLevel: BLACK, whiteLevel: WHITE, cfa: [0, 1, 1, 2], colorMatrix: [0.9505, 0, -0.0006, 0.3181, 0.7288, 0.0248, 0.0447, -0.0178, 0.9622], whiteBalance: [2.1, 1, 1.9, 1], orientation: 1, make: 'TestCam', model: 'PoC-1', name: `synth(${dx},${dy})` };
     };
 
     const opts = { tileSize: 16, searchDistance: 32, noiseReduction: 13 };
@@ -141,7 +142,7 @@ try {
           data[y * WI + x] = Math.max(0, Math.min(WHITE - 1, Math.round(BLACK[(y % 2) * 2 + (x % 2)] + texture(xs, ys) + noise)));
         }
       }
-      return { width: WI, height: HI, data, blackLevel: BLACK, whiteLevel: WHITE, name: `synth(${dx},${dy},${seed})` };
+      return { width: WI, height: HI, data, blackLevel: BLACK, whiteLevel: WHITE, cfa: [0, 1, 1, 2], colorMatrix: [0.9505, 0, -0.0006, 0.3181, 0.7288, 0.0248, 0.0447, -0.0178, 0.9622], whiteBalance: [2.1, 1, 1.9, 1], orientation: 1, make: 'TestCam', model: 'PoC-1', name: `synth(${dx},${dy},${seed})` };
     };
     // a frame with a locally displaced subject block (moving subject), aligned background:
     // the ROI alignment-variation score must distinguish it from rigidly shifted frames
@@ -258,19 +259,33 @@ try {
       t8.gridDims = `${session8.tileInfo.w}×${session8.tileInfo.h}`;
 
       // T9: the merged result can be rendered as a session view (the inspector's "Merged"
-      // tab): box-averaged, tonemapped to the brightest block, cached per output size
+      // tab): flashraw-developed RGB (the fixture's warm as-shot WB must show as channel
+      // spread), cached per output size and across selected frames
       session8.mergedResult = {
         pixels: r8reuse.pixels, width: r8reuse.width, height: r8reuse.height,
-        blackLevel: BLACK, whiteLevel: WHITE, count: frames8.length, name: 'synth',
+        dngBytes: writeDNG(r8reuse.pixels, {
+          width: r8reuse.width, height: r8reuse.height, blackLevel: BLACK, whiteLevel: WHITE,
+          cfa: [0, 1, 1, 2], colorMatrix: [0.9505, 0, -0.0006, 0.3181, 0.7288, 0.0248, 0.0447, -0.0178, 0.9622],
+          whiteBalance: [2.1, 1, 1.9, 1], orientation: 1, make: 'TestCam', model: 'PoC-1',
+        }),
+        blackLevel: BLACK, whiteLevel: WHITE,
+        cfa: [0, 1, 1, 2], colorMatrix: [0.9505, 0, -0.0006, 0.3181, 0.7288, 0.0248, 0.0447, -0.0178, 0.9622],
+        whiteBalance: [2.1, 1, 1.9, 1], orientation: 1, make: 'TestCam', model: 'PoC-1',
+        count: frames8.length, name: 'synth',
       };
       const m1 = await session8.renderFrame(0, { mode: 'merged', outWidth: 32, outHeight: 32 });
       const m2 = await session8.renderFrame(1, { mode: 'merged', outWidth: 32, outHeight: 32 }); // cache hit
-      const lit = (b) => {
-        let n = 0;
-        for (let i = 0; i < b.rgba.length; i += 4) if (b.rgba[i] + b.rgba[i + 1] + b.rgba[i + 2] > 12) n++;
-        return n / (b.rgba.length / 4);
+      const stats = (b) => {
+        let litN = 0, colored = 0;
+        for (let i = 0; i < b.rgba.length; i += 4) {
+          if (b.rgba[i] + b.rgba[i + 1] + b.rgba[i + 2] > 12) litN++;
+          const mx = Math.max(b.rgba[i], b.rgba[i + 1], b.rgba[i + 2]), mn = Math.min(b.rgba[i], b.rgba[i + 1], b.rgba[i + 2]);
+          if (mx - mn > 10) colored++;
+        }
+        return { lit: litN / (b.rgba.length / 4), colored: colored / (b.rgba.length / 4) };
       };
-      t9 = { lit: lit(m1.bitmap), cached: m1.bitmap === m2.bitmap, info: m1.info };
+      const st = stats(m1.bitmap);
+      t9 = { lit: st.lit, colored: st.colored, cached: m1.bitmap === m2.bitmap, info: m1.info };
       session8.destroy();
     }
     session.destroy();
@@ -331,8 +346,9 @@ try {
     }
     check('T8 reuse-merge output is pixel-identical to a full align+merge', out.t8.identical,
       `maxDelta=${out.t8.maxDelta} grid=${out.t8.gridDims} reuseMs=${out.t8.reuseMs?.toFixed(0)}`);
-    check('T9 merged view renders non-trivial output (cached across frames)', out.t9 && out.t9.lit > 0.1 && out.t9.cached,
-      `lit=${((out.t9?.lit || 0) * 100).toFixed(0)}% cached=${out.t9?.cached} — ${(out.t9?.info || '').slice(0, 70)}`);
+    check('T9 merged view renders developed RGB (cached across frames)',
+      out.t9 && out.t9.lit > 0.1 && out.t9.colored > 0.02 && out.t9.cached,
+      `lit=${((out.t9?.lit || 0) * 100).toFixed(0)}% colored=${((out.t9?.colored || 0) * 100).toFixed(0)}% cached=${out.t9?.cached} — ${(out.t9?.info || '').slice(0, 60)}`);
     check('T7 ref difference render produces output', out.t7.refDiff > 0.1,
       `nonBlack=${(out.t7.refDiff * 100).toFixed(0)}%`);
     for (const k of ['refAfter', 'origAfter', 'diffAfter', 'warpedAfter']) {

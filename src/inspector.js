@@ -39,15 +39,11 @@ export class InspectorUI {
   /**
    * @param {InspectionSession} session from performInspection()
    * @param {{ onMerge: (includedFrames: Array) => void,
-   *           onOpenPreview?: () => void,
    *           initialRoi?: {x0:number,y0:number,x1:number,y1:number}|null }} opts
    *   initialRoi: subject area detected from the reference frame's AF metadata; when
    *   omitted (or arriving late via applyAfAreaRoi), the centered half is used.
-   *   onOpenPreview: invoked by the merge bar's "Preview & download" button (shown once
-   *   a merged result exists).
    */
-  constructor(session, { onMerge, onOpenPreview = null, initialRoi = null }) {
-    this.onOpenPreview = onOpenPreview;
+  constructor(session, { onMerge, initialRoi = null }) {
     this.session = session;
     this.onMerge = onMerge;
 
@@ -80,13 +76,13 @@ export class InspectorUI {
       mergeText: $('inspMergeText'),
       mergeBtn: $('inspMerge'),
       mergedMode: $('inspMergedMode'),
-      openPreview: $('inspOpenPreview'),
+      downloadDng: $('inspDownloadDng'),
     };
     // fresh view: no merged result yet (the buttons are revealed by setMerged; the DOM
     // elements persist across inspections, so re-hide them here)
     this.mergedResult = null;
     this.el.mergedMode.hidden = true;
-    this.el.openPreview.hidden = true;
+    this.el.downloadDng.hidden = true;
 
     // ---- UI state (port of InspectorContentView's @State vars) ----
     this.state = {
@@ -411,7 +407,12 @@ export class InspectorUI {
       this.onMerge(included.map((f) => f.idx));
     });
     el.mergedMode.addEventListener('click', () => this.setMode('merged'));
-    el.openPreview.addEventListener('click', () => this.onOpenPreview?.());
+    // download the merged DNG via the app-wide download link (a click on the anchor
+    // with a blob href + download attribute saves the file)
+    el.downloadDng.addEventListener('click', () => {
+      const a = document.getElementById('download');
+      if (a && !a.classList.contains('disabled')) a.click();
+    });
 
     // keyboard navigation (only while the inspector is visible and no text input has focus)
     this.keyHandler = (e) => {
@@ -460,14 +461,14 @@ export class InspectorUI {
   /**
    * Hand a finished merge to the inspection view: the burst-level result becomes an
    * extra "Merged" mode (like the Reference view), the mode is selected, and the merge
-   * bar gains a "Preview & download" button. Re-merging replaces the result.
+   * bar gains a "Download DNG" button. Re-merging replaces the result.
    */
   setMerged(merged) {
     this.session.mergedResult = merged;
     this.session._mergedCache = null; // invalidate the rendered overview
     this.mergedResult = merged;
     this.el.mergedMode.hidden = false;
-    this.el.openPreview.hidden = false;
+    this.el.downloadDng.hidden = false;
     this.setMode('merged');
   }
 

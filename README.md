@@ -205,7 +205,7 @@ interpreter (~25 MB) downloads lazily on the first inspection and is run on
 the reference frame only (~0.5 s). Verified for Nikon Z bodies; other makes
 fall back to the centered half of the frame. The toolbar's *Set subject from
 autofocus point* button (next to *Clear subject*) re-applies the detected
-area at any time.
+area at any time and re-places the anchor at the area's center.
 
 Not ported from the Swift branch: stack record files (a browser can't write
 next to the download; re-open the original RAWs instead). The Swift branch's

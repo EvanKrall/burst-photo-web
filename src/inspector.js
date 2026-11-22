@@ -19,7 +19,9 @@
 //   it; the list can be sorted by either. The default subject area comes from the reference
 //   frame's autofocus-area metadata when available (src/af_area.js, WASM exiftool — the Swift
 //   app reads the same maker-note tags natively), otherwise it is the centered half of the frame;
-//   the toolbar's "Set subject from autofocus point" re-applies the detected area at any time.
+//   the toolbar's "Set subject from autofocus point" re-applies the detected area at any time
+//   and re-places the anchor at the area's center (handing anchor control back to the
+//   automatic placement).
 // - The frame list supports checking/unchecking images (excluded from the merge), and multi-
 //   selection with cmd-click (toggle one) and shift-click (toggle a range).
 // - Arrow keys scrub through frames IN LOCKSTEP with the preview: while a render is in flight,
@@ -312,8 +314,14 @@ export class InspectorUI {
       this.rebuildOrder();
     });
     el.clearRoi.addEventListener('click', () => this.setRoi(null));
-    // re-apply the AF-area-derived subject area (hidden until detection reports one)
-    el.setAfRoi.addEventListener('click', () => { if (this.afRoi) this.setRoi(this.afRoi); });
+    // re-apply the AF-area-derived subject area (hidden until detection reports one). Like
+    // the automatic application, the anchor is re-placed at the area's center: hand anchor
+    // control back to the automatic placement, then setRoi puts the anchor at the midpoint.
+    el.setAfRoi.addEventListener('click', () => {
+      if (!this.afRoi) return;
+      this.state.anchorManual = false;
+      this.setRoi(this.afRoi);
+    });
 
     // frame list rows: click = select, cmd-click = toggle in selection, shift-click = range,
     // checkbox = include/exclude (multi-selection follows)

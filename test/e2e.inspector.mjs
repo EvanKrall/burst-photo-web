@@ -319,13 +319,21 @@ try {
   await new Promise((r) => setTimeout(r, 500));
   const afApplied = await page.evaluate(() => {
     const s = window.__inspector.state;
-    return { roi: s.roi, touched: s.roiTouched, clearBtn: !document.getElementById('inspClearRoi').hidden };
+    return { roi: s.roi, touched: s.roiTouched, clearBtn: !document.getElementById('inspClearRoi').hidden,
+             anchor: s.anchor, anchorManual: s.anchorManual };
   });
   check('AF-subject button applies the detected area',
     afApplied.touched && afApplied.clearBtn
     && Math.abs(afApplied.roi.x0 - 0.3) < 1e-9 && Math.abs(afApplied.roi.y0 - 0.3) < 1e-9
     && Math.abs(afApplied.roi.x1 - 0.6) < 1e-9 && Math.abs(afApplied.roi.y1 - 0.6) < 1e-9,
     `roi=${JSON.stringify(afApplied.roi)}`);
+  // the anchor follows the AF area (center of 0.3..0.6) even though a manual anchor was
+  // set earlier in the test: the button hands anchor control back to the automatic placement
+  check('AF-subject button re-places the anchor at the AF-area center',
+    afApplied.anchor != null && afApplied.anchorManual === false
+    && Math.abs(afApplied.anchor.u - 0.45) < 1e-9 && Math.abs(afApplied.anchor.v - 0.45) < 1e-9
+    && Number.isInteger(afApplied.anchor.tileX) && Number.isInteger(afApplied.anchor.tileY),
+    `anchor=${JSON.stringify(afApplied.anchor)} manual=${afApplied.anchorManual}`);
 
   // merge the remaining 3 frames → preview + download
   await page.click('#inspMerge');

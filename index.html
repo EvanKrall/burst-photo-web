@@ -7,6 +7,8 @@
   <title>Burst Photo Web (PoC)</title>
   <style>
     :root { color-scheme: dark; }
+  /* the hidden attribute must win over component display values (e.g. .insp-ctl's flex) */
+  [hidden] { display: none !important; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #111418; color: #d8dde4; margin: 0; padding: 1.5rem 2rem;
     }
@@ -70,6 +72,98 @@
     #panel h2 { font-size: 0.9rem; margin: 0; color: #8a929c; }
     .hint { color: #8a929c; font-size: 0.85rem; margin-top: 0.75rem; }
     .error { color: #ff6b6b; }
+
+    /* ---- alignment inspector pane ---- */
+    #inspectorPane {
+      display: flex; flex-direction: column; gap: 0;
+      height: calc(100vh - 3.4rem); min-height: 480px;
+      background: #0c0e11; border: 1px solid #22272e; border-radius: 12px; overflow: hidden;
+    }
+    #inspToolbar {
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+      padding: 0.5rem 0.75rem; background: #181d24; border-bottom: 1px solid #22272e;
+    }
+    .seg { display: inline-flex; border: 1px solid #3a4149; border-radius: 8px; overflow: hidden; }
+    .seg button {
+      background: #222a33; color: #d8dde4; border: none; border-radius: 0;
+      padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer; border-right: 1px solid #3a4149;
+    }
+    .seg button:last-child { border-right: none; }
+    .seg button.active { background: #1c4e80; color: #fff; font-weight: 600; }
+    .seg.small button { padding: 0.15rem 0.5rem; font-size: 0.7rem; }
+    .insp-ctl { display: flex; align-items: center; gap: 0.45rem; font-size: 0.78rem; color: #8a929c; }
+    .insp-ctl input[type="range"] { width: 110px; }
+    .insp-ctl input[type="checkbox"] { accent-color: #4a9eff; }
+    #inspClearAnchor { font-size: 0.75rem; padding: 0.2rem 0.6rem; cursor: pointer; }
+    #inspMain { flex: 1; display: flex; min-height: 0; }
+    #inspSidebar {
+      flex: 0 0 252px; display: flex; flex-direction: column; min-height: 0;
+      background: #111418; border-right: 1px solid #22272e;
+    }
+    #inspListHead { display: flex; align-items: center; gap: 0.4rem; padding: 0.45rem 0.5rem 0.15rem; }
+    #inspListHead .hint-text { font-size: 0.65rem; color: #5a626b; }
+    #inspClearRoi { font-size: 0.65rem; padding: 0.1rem 0.4rem; cursor: pointer; margin-left: auto; }
+    #inspColHead {
+      display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0 0.9rem 0.2rem 0;
+      font-size: 0.62rem; color: #5a626b;
+    }
+    #inspColHead span { width: 40px; text-align: right; }
+    #inspFrameList { flex: 1; overflow-y: auto; padding: 0.25rem 0.4rem 0.5rem; }
+    .insp-row {
+      display: flex; align-items: center; gap: 6px; padding: 4px;
+      border-radius: 6px; cursor: pointer; margin-bottom: 2px;
+    }
+    .insp-row.selected { background: rgba(74, 158, 255, 0.22); }
+    .insp-check {
+      flex: none; width: 14px; height: 14px; border-radius: 3px;
+      border: 1px solid #3a4149; background: transparent; cursor: pointer; position: relative;
+    }
+    .insp-check.included { background: #1c4e80; border-color: #2b6cb0; }
+    .insp-check.included::after {
+      content: ""; position: absolute; left: 3.5px; top: 0.5px; width: 4px; height: 8px;
+      border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(40deg);
+    }
+    .insp-thumb {
+      flex: none; width: 44px; height: 30px; border-radius: 3px;
+      background: #181d24; border: 0.5px solid #22272e; object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .insp-meta { flex: 1; min-width: 0; line-height: 1.25; }
+    .insp-name { font-size: 0.72rem; font-weight: 500; white-space: nowrap; }
+    .insp-refbadge {
+      font-size: 0.55rem; font-weight: 700; background: #1c4e80; color: #fff;
+      border-radius: 3px; padding: 0 3px; vertical-align: 1px;
+    }
+    .insp-file { font-size: 0.62rem; color: #8a929c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .insp-score {
+      flex: none; width: 40px; text-align: right; font-size: 0.7rem;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace; opacity: 0.85;
+    }
+    .insp-score.none { opacity: 0.3; }
+    #inspImageWrap { flex: 1; position: relative; overflow: auto; background: #000; display: flex; }
+    #inspCanvasHolder { position: relative; margin: auto; }
+    #inspCanvas, #inspOverlay { position: absolute; left: 0; top: 0; display: block; }
+    #inspOverlay { cursor: crosshair; }
+    #inspCanvasHolder.pixelated #inspCanvas { image-rendering: pixelated; }
+    #inspZoomBadge {
+      position: absolute; right: 10px; bottom: 10px; font-size: 0.68rem; color: #fff;
+      background: rgba(0, 0, 0, 0.55); border-radius: 4px; padding: 3px 6px; pointer-events: none;
+    }
+    #inspSpinner {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      color: #8a929c; font-size: 0.8rem; background: rgba(0,0,0,0.6); padding: 4px 10px;
+      border-radius: 6px; pointer-events: none;
+    }
+    #inspStatsBar { padding: 0.35rem 0.75rem; border-top: 1px solid #22272e; font-size: 0.72rem; }
+    #inspStatsLine { font-weight: 500; }
+    #inspInfoLine { color: #8a929c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #inspMergeBar {
+      display: flex; align-items: center; gap: 1rem; padding: 0.45rem 0.75rem;
+      border-top: 1px solid #22272e; background: #181d24;
+    }
+    #inspMergeText { font-size: 0.75rem; color: #8a929c; flex: 1; }
+    #inspMerge { font-size: 0.85rem; padding: 0.35rem 1rem; cursor: pointer; }
+    #inspMerge:disabled { opacity: 0.4; cursor: default; }
   </style>
 </head>
 <body>
@@ -97,6 +191,9 @@
             <option value="64" selected>Medium</option>
             <option value="32">Large</option>
           </select>
+        </label>
+        <label style="flex-direction:row; align-items:center;">Inspect alignment first
+          <input type="checkbox" id="inspectFirst" checked style="accent-color:#4a9eff;">
         </label>
         <button id="process" class="primary" disabled>Process burst</button>
       </div>
@@ -145,6 +242,64 @@
       <section id="previewPane" hidden>
         <canvas id="canvas"></canvas>
         <p class="hint">Drop a new burst anywhere on this pane to process another stack.</p>
+      </section>
+
+      <!-- alignment inspector: shown after decoding when "Inspect alignment first" is on.
+           Structure + interaction live in src/inspector.js. -->
+      <section id="inspectorPane" hidden>
+        <div id="inspToolbar">
+          <div class="seg" id="inspModes">
+            <button data-mode="alignment">Alignment</button>
+            <button data-mode="flow">Flow</button>
+            <button data-mode="difference">Difference</button>
+            <button data-mode="original">Original</button>
+            <button data-mode="warped">Warped</button>
+            <button data-mode="reference">Reference</button>
+          </div>
+          <span class="insp-ctl" id="inspAlignControls" hidden>
+            <label class="insp-ctl"><input type="checkbox" id="inspAlignShared" checked> Shared scale</label>
+            <span id="inspAlignScaleLabel" hidden></span>
+            <input type="range" id="inspAlignScale" min="4" max="252" step="2" value="32" hidden>
+          </span>
+          <span class="insp-ctl" id="inspDiffControls" hidden>
+            <label class="insp-ctl"><input type="checkbox" id="inspMatchExposure" checked> Match brightness</label>
+            <label class="insp-ctl"><input type="checkbox" id="inspDiffShared" checked> Shared scale</label>
+            <span id="inspDiffGainLabel">gain 4.0</span>
+            <input type="range" id="inspDiffGain" min="0.5" max="20" step="0.5" value="4">
+          </span>
+          <button id="inspClearAnchor" hidden>Clear anchor</button>
+        </div>
+        <div id="inspMain">
+          <div id="inspSidebar">
+            <div id="inspListHead">
+              <div class="seg small" id="inspSort">
+                <button data-sort="0" class="active">frame</button>
+                <button data-sort="1">diff</button>
+                <button data-sort="2">align</button>
+              </div>
+              <span class="hint-text" id="inspRoiHint">drag on image to mark subject</span>
+              <button id="inspClearRoi" hidden>Clear subject</button>
+            </div>
+            <div id="inspColHead"><span title="Mean difference to the reference inside the subject area (lower = more similar)">diff</span><span title="Variation of the alignment field inside the subject area (lower = cleaner mapping)">align</span></div>
+            <div id="inspFrameList"></div>
+          </div>
+          <div id="inspImageWrap">
+            <div id="inspCanvasHolder">
+              <canvas id="inspCanvas"></canvas>
+              <canvas id="inspOverlay"></canvas>
+            </div>
+            <div id="inspZoomBadge" hidden></div>
+            <div id="inspSpinner" hidden>rendering…</div>
+          </div>
+        </div>
+        <div id="inspStatsBar">
+          <div id="inspStatsLine"></div>
+          <div id="inspInfoLine"></div>
+        </div>
+        <div id="inspMergeBar">
+          <span id="inspMergeText"></span>
+          <button id="inspMerge" class="primary">Merge</button>
+        </div>
       </section>
     </main>
   </div>

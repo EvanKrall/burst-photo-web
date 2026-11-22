@@ -1,8 +1,16 @@
 // UI orchestration: file loading, flashraw decode, WebGPU pipeline, preview + DNG output.
+//
+// Flow: drop → decode → (optionally) the alignment inspector (src/inspector.js) → merge.
+// With "Inspect alignment first" checked (default), the burst is aligned without merging
+// (src/inspect.js) and the inspector lets the user review every frame's alignment, score
+// them inside a subject area and exclude bad frames; the merge runs on the frames that
+// remain checked when Merge is pressed.
 
 import { initGPU, GPUContext } from './gpu.js';
 import { WGSL } from './kernels.js';
 import { alignMergeSpatial } from './pipeline.js';
+import { performInspection } from './inspect.js';
+import { InspectorUI } from './inspector.js';
 import { decodeRaw, developPreview } from './raw.js';
 import { writeDNG } from './dng_writer.js';
 import { renderPreview } from './preview.js';
@@ -13,7 +21,9 @@ const stage = document.getElementById('stage');
 const introPane = document.getElementById('intro');
 const progressPane = document.getElementById('progressPane');
 const previewPane = document.getElementById('previewPane');
+const inspectorPane = document.getElementById('inspectorPane');
 const fileInput = document.getElementById('fileInput');
+const inspectFirst = document.getElementById('inspectFirst');
 const processBtn = document.getElementById('process');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
@@ -103,6 +113,16 @@ let loadedFrames = []; // [{ name, width, height, data, blackLevel, whiteLevel, 
 let decoding = false; // a dropped burst is currently being decoded
 let processing = false; // the GPU pipeline is currently running
 let settingsDirty = false; // settings changed since the last completed run
+let inspector = null; // active InspectorUI (alignment inspection session)
+
+function disposeInspector() {
+  if (inspector) {
+    inspector.destroy();
+    inspector.session.destroy();
+    window.__inspector = undefined;
+    inspector = null;
+  }
+}
 
 // ---- drag & drop + right-pane switching ----
 drop.addEventListener('click', () => fileInput.click());
@@ -118,8 +138,8 @@ stage.addEventListener('drop', (e) => {
 });
 fileInput.addEventListener('change', () => loadFiles(fileInput.files));
 
-// The right pane shows exactly one of: intro / progress / preview.
-const panes = { intro: introPane, progress: progressPane, preview: previewPane };
+// The right pane shows exactly one of: intro / progress / inspector / preview.
+const panes = { intro: introPane, progress: progressPane, inspector: inspectorPane, preview: previewPane };
 function showPane(name) {
   for (const key of Object.keys(panes)) panes[key].hidden = key !== name;
 }
@@ -152,6 +172,7 @@ async function loadFiles(fileList) {
   decoding = true;
   logEl.textContent = '';
   loadedFrames = [];
+  disposeInspector();
   processBtn.disabled = true;
   downloadLink.classList.add('disabled');
   downloadLink.removeAttribute('href');
@@ -190,19 +211,74 @@ async function loadFiles(fileList) {
   } finally {
     decoding = false;
   }
-  // No click needed: run the pipeline right away. The "Process burst" button
-  // stays enabled afterwards for reprocessing with different settings.
-  await processBurst();
+  // With inspection enabled (default): align the burst and let the user review the frames
+  // before merging. Otherwise run the pipeline right away; the "Process burst" button stays
+  // enabled afterwards for reprocessing with different settings.
+  if (inspectFirst.checked) {
+    await runInspection();
+  } else {
+    await processBurst();
+  }
 }
 
 const yieldToUI = () => new Promise((r) => setTimeout(r, 0));
 
-// ---- processing ----
-async function processBurst() {
+// ---- alignment inspection (pre-merge review) ----
+async function runInspection() {
   if (decoding || processing || loadedFrames.length < 2) return;
+  setProgress(0, 'aligning…');
+  try {
+    log('Initializing WebGPU…');
+    const { adapter, device } = await initGPU();
+    log(`Adapter: ${adapter.info?.vendor || '?'} ${adapter.info?.architecture || ''} — max buffer ${(device.limits.maxStorageBufferBindingSize / 1e6).toFixed(0)} MB`);
+    const gpu = new GPUContext(device);
+    gpu.setShaderModule(WGSL);
+    const options = {
+      tileSize: Number(document.getElementById('tileSize').value),
+      searchDistance: Number(document.getElementById('searchDistance').value),
+      refIdx: Math.floor(loadedFrames.length / 2),
+    };
+    log(`Aligning ${loadedFrames.length} frames for inspection (tile=${options.tileSize}, search=${options.searchDistance})…`);
+    const session = await performInspection(gpu, loadedFrames, options, (p) => {
+      setProgress(p.total > 1 ? p.frame / p.total : 1, `aligning ${p.frame}/${p.total}`);
+      if (p.frame % 5 === 0 || p.frame === p.total) log(`aligned ${p.frame}/${p.total}`);
+    });
+    setProgress(1, 'inspection ready');
+    log(`Inspection ready: ${session.tileInfo.w}×${session.tileInfo.h} tile grid, shared alignment scale ${session.alignmentScale} l0-px. Background calibration measures the shared difference scale.`);
+    showPane('inspector'); // pane must be visible before the UI measures its canvas area
+    inspector = new InspectorUI(session, {
+      onMerge: (includedIndices) => {
+        // release the inspection view (and its GPU memory) before the merge reloads everything
+        disposeInspector();
+        showPane('progress');
+        processBurst(includedIndices);
+      },
+    });
+    window.__inspector = inspector; // exposed for tests
+    log('Merge the checked frames with the button in the inspector (or "Process burst" with all frames).');
+  } catch (err) {
+    log(`ERROR: ${err.message}`);
+    console.error(err);
+    setProgress(0, 'inspection failed');
+  }
+}
+
+// ---- processing ----
+// frameIndices: optional list of indices into loadedFrames to merge (inspector selection);
+// defaults to every loaded frame. The reference is the center frame of the merged list.
+async function processBurst(frameIndices = null) {
+  if (decoding || processing || loadedFrames.length < 2) return;
+  const indices = frameIndices && frameIndices.length >= 2
+    ? frameIndices
+    : loadedFrames.map((_, i) => i);
+  if (indices.length < 2) {
+    log('At least 2 frames must be selected to merge.');
+    return;
+  }
   settingsDirty = false;
   processing = true;
   processBtn.disabled = true;
+  if (!inspectorPane.hidden) showPane('progress'); // merging from the inspector pane
   try {
     log('Initializing WebGPU…');
     const { adapter, device } = await initGPU();
@@ -211,9 +287,10 @@ async function processBurst() {
     const gpu = new GPUContext(device);
     gpu.setShaderModule(WGSL);
 
-    // reference = center frame of the burst (matches Burst Photo default)
-    const refIdx = Math.floor(loadedFrames.length / 2);
-    const frames = [loadedFrames[refIdx], ...loadedFrames.slice(0, refIdx), ...loadedFrames.slice(refIdx + 1)];
+    // reference = center frame of the merged list (matches Burst Photo default)
+    const refIdx = Math.floor(indices.length / 2);
+    const ordered = [indices[refIdx], ...indices.slice(0, refIdx), ...indices.slice(refIdx + 1)];
+    const frames = ordered.map((i) => loadedFrames[i]);
 
     const options = {
       tileSize: Number(document.getElementById('tileSize').value),
@@ -312,7 +389,11 @@ async function processBurst() {
   }
 }
 
-processBtn.addEventListener('click', processBurst);
+processBtn.addEventListener('click', () => {
+  // with an active inspection session, "Process burst" merges the frames the inspector has
+  // still checked (same as the inspector's Merge button); otherwise every loaded frame
+  processBurst(inspector ? inspector.includedFrames().map((f) => f.idx) : null);
+});
 
 // "Process burst" is only clickable when a processed result is out of date:
 // greyed before any burst, during decode/processing, and right after a run

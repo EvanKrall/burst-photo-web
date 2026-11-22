@@ -1,5 +1,7 @@
 # Burst Photo Web (proof of concept)
 
+Just want to use it? [Click here.](https://www.evankrall.com/burst-photo-web/)
+
 A browser-based proof-of-concept port of [Burst Photo](https://github.com/martin-marek/hdr-plus-swift)
 (Google's HDR+ burst-photography pipeline in Swift/Metal), rebuilt with:
 
@@ -68,30 +70,9 @@ dist/
 ### Continuous deployment to evankrall.github.io
 
 `.github/workflows/deploy-pages.yml` builds `dist/` on every push to `main`
-and pushes it into the `EvanKrall/evankrall.github.io` repo under
-`burst-photo-web/`, published at https://www.evankrall.com/burst-photo-web/.
+and pushes it into Github Pages, published at https://www.evankrall.com/burst-photo-web/.
 
-One-time setup for the repo owner:
-
-```bash
-ssh-keygen -t ed25519 -C "burst-photo-web-pages-deploy" -f ./bpw_deploy_key
-```
-
-1. `bpw_deploy_key.pub` → **Deploy key with write access** on
-   `EvanKrall/evankrall.github.io` (Settings → Deploy keys).
-2. Contents of `bpw_deploy_key` → Actions secret `DEPLOY_KEY` on
-   `EvanKrall/burst-photo-web` (Settings → Secrets and variables → Actions).
-
-Caveat: if the Hugo pipeline for evankrall.github.io rebuilds the whole site
-and wipes unknown directories, either preserve `burst-photo-web/` there or
-run this workflow after the Hugo deploy. Manual deploys: `workflow_dispatch`
-is enabled (Actions tab → Deploy → Run workflow).
-
-Without the `vendor/` folder the loader falls back to CDN ESM builds
-(jsDelivr/esm.sh) — works, but vendoring is the reliable path since the
-`.wasm` binaries are `import.meta.url` assets.
-
-## Running
+## Running Locally
 
 ```bash
 cd burst-photo-web

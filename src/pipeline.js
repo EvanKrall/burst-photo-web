@@ -79,7 +79,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
   const ref = frames[0]; // caller passes frames already ordered with ref first
   const refBlack4 = gpu.storageFromData('ref-black4', new Float32Array(ref.blackLevel));
   const refBlackMean = Math.max(0, ref.blackLevel.reduce((a, b) => a + b, 0) / ref.blackLevel.length);
-  const refPadded = await prepareFrame(gpu, ref, padX, padY, refBlack4);
+  const refPadded = await prepareFrame(gpu, ref, padX, padY);
   const refCropped = crop(gpu, refPadded, padX, padY);
 
   // reference pyramid (port of build_pyramid; see note on buildPyramid below)
@@ -95,8 +95,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
   for (let f = 1; f < nImages; f++) {
     onProgress?.({ stage: 'align+merge', frame: f, total: nImages });
     const comp = frames[f];
-    const compBlack4 = gpu.storageFromData('comp-black4', new Float32Array(comp.blackLevel));
-    const compPadded = await prepareFrame(gpu, comp, padX, padY, compBlack4);
+    const compPadded = await prepareFrame(gpu, comp, padX, padY);
 
     const alignedPadded = alignTexture(gpu, refPyramid, compPadded, {
       nLevels, downscaleFactorArray, tileSizeArray,
@@ -116,7 +115,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
     accumulate(gpu, outPlane, merged, nImages);
 
     // free per-frame intermediates
-    for (const b of [compBlack4, compPadded.buf, alignedPadded.buf, aligned.buf,
+    for (const b of [compPadded.buf, alignedPadded.buf, aligned.buf,
                      compBlurred.buf, texDiff.buf, weight.buf, weightUp.buf, merged.buf]) {
       b.destroy();
     }
@@ -154,14 +153,14 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
 // ---------------------------------------------------------------------------
 // stage helpers
 
-async function prepareFrame(gpu, frame, padX, padY, black4) {
+async function prepareFrame(gpu, frame, padX, padY) {
   const { width: W, height: H } = frame;
   // pack two 16-bit samples per u32 (zero-copy view over the Uint16Array)
   const packed = new Uint32Array(frame.data.buffer, frame.data.byteOffset, Math.floor((W * H) / 2));
   const rawBuf = gpu.storageFromData('raw-in', packed);
   const out = new Plane(gpu.zeros(`prepared-${frame.name ?? ''}`, (W + 2 * padX) * (H + 2 * padY) * 4), W + 2 * padX, H + 2 * padY);
   gpu.dispatch('prepare_bayer',
-    [{ buffer: rawBuf }, { buffer: black4 }, { buffer: out.buf },
+    [{ buffer: rawBuf }, { buffer: out.buf },
      { buffer: packUniforms(['i32', 'i32', 'i32'], [W, padX, padY]) }], groups(W, H));
   // rawBuf: queue.writeBuffer already ran; destroy after the work is enqueued is fine,
   // but keep it alive until submit — dispatch submits synchronously, so destroy now.

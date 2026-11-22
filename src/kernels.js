@@ -30,29 +30,26 @@ fn load_raw(raw: ptr<storage, array<u32>, read>, idx: u32) -> u32 {
 }
 
 // ============================================================ prepare_bayer
-// Port of texture.metal:prepare_texture_bayer (hot-pixel correction and
-// exposure-diff correction omitted for the PoC: no hotpixel map, exposure_diff = 0).
+// Port of texture.metal:prepare_texture_bayer for uniform exposure (exposure_diff = 0):
+// the Metal expression (v - black)*2^(exposure_diff/100) + black simplifies to v, so
+// preparation is black-level-neutral (black is subtracted once at convert_to_u16).
+// Hot-pixel correction and exposure bracketing are omitted in the PoC.
 // Params: in_w, pad_left, pad_top
 struct PrepareParams { in_w: i32, pad_left: i32, pad_top: i32, };
-@group(0) @binding(0) var<storage, read>       raw_in:      array<u32>;
-@group(0) @binding(1) var<storage, read>       black4:      array<f32>;
-@group(0) @binding(2) var<storage, read_write> plane_out:   array<f32>;
-@group(0) @binding(3) var<uniform>             prepare_p:   PrepareParams;
+@group(0) @binding(0) var<storage, read>       raw_in:    array<u32>;
+@group(0) @binding(1) var<storage, read_write> plane_out: array<f32>;
+@group(0) @binding(2) var<uniform>             prepare_p: PrepareParams;
 
 @compute @workgroup_size(8, 8)
 fn prepare_bayer(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let x = i32(gid3.x);
     let y = i32(gid3.y);
     let idx = y * prepare_p.in_w + x;
-    var pixel_value = f32(load_raw(&raw_in, u32(idx)));
-
-    // per-CFA-cell black level, layout matches Metal: black_levels[(y%2)*2 + (x%2)]
-    let black_level = black4[u32((y % 2) * 2 + (x % 2))];
-    pixel_value = max(pixel_value - black_level, 0.0);
+    let pixel_value = f32(load_raw(&raw_in, u32(idx)));
 
     let w_out = prepare_p.in_w + 2 * prepare_p.pad_left;   // padded width
     let o = (y + prepare_p.pad_top) * w_out + (x + prepare_p.pad_left);
-    plane_out[o] = pixel_value;
+    plane_out[o] = max(pixel_value, 0.0);
 }
 
 // ==================================================================== blur

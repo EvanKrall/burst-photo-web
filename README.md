@@ -15,9 +15,11 @@ no frequency-domain merge. See "PoC scope" below.
 
 The flashraw integration and the DNG writer are verified headlessly
 (`npm test`: synthetic Bayer frame → DNG → flashraw decode → exact pixel +
-metadata round-trip). The WGSL kernels are careful line-by-line ports of the
-Metal sources but have **not yet executed on a GPU** — the first browser run
-is the remaining validation step.
+metadata round-trip, 20 checks). The WGSL kernels are verified on a real GPU
+(`npm run smoke`: opens a Chrome window, compiles the shader module, then runs
+the full pipeline twice on synthetic bursts on your actual GPU — identical
+frames must round-trip exactly, and a (2,1)-shifted comparison frame must be
+motion-rejected). Both suites currently pass.
 
 ## flashraw integration notes (verified against v0.4.0 source)
 

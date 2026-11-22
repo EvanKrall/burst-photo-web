@@ -5,6 +5,7 @@ import { WGSL } from './kernels.js';
 import { alignMergeSpatial } from './pipeline.js';
 import { decodeDNG } from './raw.js';
 import { writeDNG } from './dng_writer.js';
+import { renderPreview } from './preview.js';
 
 const logEl = document.getElementById('log');
 const drop = document.getElementById('drop');
@@ -129,38 +130,12 @@ processBtn.addEventListener('click', async () => {
     downloadLink.download = refMeta.name.replace(/\.dng$/i, '') + '_merged_web.dng';
 
     // ---- quick preview: 2x2 CFA blocks -> RGB ----
-    const scale = Math.max(1, Math.ceil(result.width / 1600)); // cap preview width
-    const pw = Math.floor(result.width / (2 * scale));
-    const ph = Math.floor(result.height / (2 * scale));
-    canvas.width = pw;
-    canvas.height = ph;
+    // ---- preview: 2x2-block CFA->RGB + white balance + gamma (see src/preview.js) ----
+    const preview = renderPreview(result.pixels, refMeta);
+    canvas.width = preview.width;
+    canvas.height = preview.height;
     const ctx = canvas.getContext('2d');
-    const img = ctx.createImageData(pw, ph);
-    const px = result.pixels;
-    const white = Math.max(1, refMeta.whiteLevel || 65535);
-    const black = Math.max(0, Math.min(...(Array.isArray(refMeta.blackLevel) ? refMeta.blackLevel : [refMeta.blackLevel])));
-    const norm = (v) => Math.max(0, Math.min(255, Math.round(((v - black) / (white - black)) * 255)));
-    // CFA-aware 2x2 -> RGB: locate channel positions within the block (row-major offsets)
-    const cfa = refMeta.cfa && refMeta.cfa.length === 4 ? refMeta.cfa : [0, 1, 1, 2];
-    const OFF = [[0, 0], [1, 0], [0, 1], [1, 1]]; // [dx, dy] per cfa slot
-    const at = (sx, sy, slot) => {
-      const [dx, dy] = OFF[slot];
-      return px[(sy + dy * scale) * result.width + sx + dx * scale];
-    };
-    const gSlots = cfa.map((c, i) => (c === 1 ? i : -1)).filter((i) => i >= 0);
-    for (let y = 0; y < ph; y++) {
-      for (let x = 0; x < pw; x++) {
-        const sx = x * 2 * scale;
-        const sy = y * 2 * scale;
-        const g = gSlots.length ? gSlots.reduce((s, i) => s + at(sx, sy, i), 0) / gSlots.length : 0;
-        const o = (y * pw + x) * 4;
-        img.data[o] = norm(at(sx, sy, cfa.indexOf(0) >= 0 ? cfa.indexOf(0) : 0));
-        img.data[o + 1] = norm(g);
-        img.data[o + 2] = norm(at(sx, sy, cfa.indexOf(2) >= 0 ? cfa.indexOf(2) : 3));
-        img.data[o + 3] = 255;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
+    ctx.putImageData(new ImageData(preview.rgba, preview.width, preview.height), 0, 0);
 
     resultEl.style.display = 'block';
     setProgress(1, 'done');

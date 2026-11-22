@@ -79,6 +79,7 @@ export async function decodeDNG(arrayBuffer, name = 'frame') {
 
     const blackLevel = extractBlack4(frame.blackLevel, frame.origin, name);
     const whiteLevel = Math.max(...(frame.whiteLevel?.length ? frame.whiteLevel : [65535]));
+    const whiteBalance = frame.whiteBalance ?? meta.whiteBalance ?? null;
     const cfa = cfaToNumbers(frame.cfa, name);
     const colorMatrix = pickColorMatrix(frame.colorMatrices ?? meta.colorMatrices, name);
 
@@ -91,6 +92,7 @@ export async function decodeDNG(arrayBuffer, name = 'frame') {
       whiteLevel,
       cfa,                  // [c0,c1,c2,c3] row-major, 0=R 1=G 2=B
       colorMatrix,          // number[9] | null  (XYZ→camera, illuminant D65 preferred)
+      whiteBalance,         // [R, G, B, G2] as-shot multipliers normalized to G=1, or null
       orientation: meta.orientation ?? 1,
       make: meta.camera?.make ?? null,
       model: meta.camera?.model ?? null,

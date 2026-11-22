@@ -13,19 +13,49 @@ This is a **proof of concept**: Bayer sensors, uniform-exposure bursts,
 spatial-domain merge only, no hot-pixel suppression, no exposure bracketing,
 no frequency-domain merge. See "PoC scope" below.
 
+The flashraw integration and the DNG writer are verified headlessly
+(`npm test`: synthetic Bayer frame → DNG → flashraw decode → exact pixel +
+metadata round-trip). The WGSL kernels are careful line-by-line ports of the
+Metal sources but have **not yet executed on a GPU** — the first browser run
+is the remaining validation step.
+
+## flashraw integration notes (verified against v0.4.0 source)
+
+- `FlashRaw.open(ArrayBuffer)` → `raw.decode({ backend: 'cpu', output: 'raw-u16', crop: 'active' })`
+  → `frame.data: Uint16Array` (Bayer mosaic of the DNG ActiveArea), never
+  falling back to the embedded preview, keeping raw black-offset sensor values.
+- `frame.blackLevel: {rows, cols, samples, values[], mean}` is anchored at the
+  **sensor buffer** origin while the cropped frame's `cfa.pattern` is anchored
+  at the frame origin — `src/raw.js` pre-rotates the black pattern by
+  `frame.origin` so the GPU kernels can assume plane-anchored 2×2 levels.
+- The `.wasm` binaries are `new URL(..., import.meta.url)` assets → local
+  `npm install` + the bundled static server is the reliable loading path
+  (CDN ESM fallbacks are attempted but best-effort).
+- flashraw also runs in Node, which is what makes `npm test` possible.
+
 ## Running
 
 ```bash
 cd hdr-plus-web
-npm start          # zero-dependency static server on http://localhost:8080
+npm install       # fetches flashraw (~1 MB JS + WASM binaries served locally)
+npm start         # zero-dependency static server on http://localhost:8080
 ```
 
 Open http://localhost:8080 in a WebGPU-capable browser (Chrome/Edge 113+,
 Safari 26, Firefox with WebGPU). Drop ≥2 DNGs from the same burst, press
 *Process burst*, get a preview and a 16-bit uncompressed Bayer DNG.
 
-`flashraw` is imported at runtime (local `node_modules` install preferred, CDN
-fallback) — see `src/raw.js`.
+A local flashraw install is the reliable path: its `.wasm` binaries are
+`new URL(..., import.meta.url)` assets, which the bundled `server.mjs` serves
+with the correct MIME type from `node_modules/`. CDN imports (jsDelivr/esm.sh)
+are attempted as fallback but are best-effort.
+
+Headless check of the DNG writer + flashraw integration (no browser needed,
+flashraw also runs in Node):
+
+```bash
+node test/roundtrip.mjs
+```
 
 ## Architecture
 

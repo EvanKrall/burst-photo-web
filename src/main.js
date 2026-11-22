@@ -120,6 +120,7 @@ processBtn.addEventListener('click', async () => {
       whiteLevel: refMeta.whiteLevel,
       cfa: refMeta.cfa,
       colorMatrix: refMeta.colorMatrix,
+      orientation: refMeta.orientation,
       make: refMeta.make,
       model: refMeta.model,
     });
@@ -139,18 +140,23 @@ processBtn.addEventListener('click', async () => {
     const white = Math.max(1, refMeta.whiteLevel || 65535);
     const black = Math.max(0, Math.min(...(Array.isArray(refMeta.blackLevel) ? refMeta.blackLevel : [refMeta.blackLevel])));
     const norm = (v) => Math.max(0, Math.min(255, Math.round(((v - black) / (white - black)) * 255)));
+    // CFA-aware 2x2 -> RGB: locate channel positions within the block (row-major offsets)
+    const cfa = refMeta.cfa && refMeta.cfa.length === 4 ? refMeta.cfa : [0, 1, 1, 2];
+    const OFF = [[0, 0], [1, 0], [0, 1], [1, 1]]; // [dx, dy] per cfa slot
+    const at = (sx, sy, slot) => {
+      const [dx, dy] = OFF[slot];
+      return px[(sy + dy * scale) * result.width + sx + dx * scale];
+    };
+    const gSlots = cfa.map((c, i) => (c === 1 ? i : -1)).filter((i) => i >= 0);
     for (let y = 0; y < ph; y++) {
       for (let x = 0; x < pw; x++) {
         const sx = x * 2 * scale;
         const sy = y * 2 * scale;
-        const r = px[sy * result.width + sx];
-        const g1 = px[sy * result.width + sx + 1];
-        const g2 = px[(sy + 1) * result.width + sx];
-        const b = px[(sy + 1) * result.width + sx + 1];
+        const g = gSlots.length ? gSlots.reduce((s, i) => s + at(sx, sy, i), 0) / gSlots.length : 0;
         const o = (y * pw + x) * 4;
-        img.data[o] = norm(r);
-        img.data[o + 1] = norm((g1 + g2) / 2);
-        img.data[o + 2] = norm(b);
+        img.data[o] = norm(at(sx, sy, cfa.indexOf(0) >= 0 ? cfa.indexOf(0) : 0));
+        img.data[o + 1] = norm(g);
+        img.data[o + 2] = norm(at(sx, sy, cfa.indexOf(2) >= 0 ? cfa.indexOf(2) : 3));
         img.data[o + 3] = 255;
       }
     }

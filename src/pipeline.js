@@ -78,11 +78,12 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
   onProgress?.({ stage: 'prepare', frame: 0, total: nImages });
   const ref = frames[0]; // caller passes frames already ordered with ref first
   const refBlack4 = gpu.storageFromData('ref-black4', new Float32Array(ref.blackLevel));
+  const refBlackMean = Math.max(0, ref.blackLevel.reduce((a, b) => a + b, 0) / ref.blackLevel.length);
   const refPadded = await prepareFrame(gpu, ref, padX, padY, refBlack4);
   const refCropped = crop(gpu, refPadded, padX, padY);
 
-  // reference pyramid
-  const refPyramid = buildPyramid(gpu, refPadded, downscaleFactorArray);
+  // reference pyramid (port of build_pyramid; see note on buildPyramid below)
+  const refPyramid = buildPyramid(gpu, refPadded, downscaleFactorArray, refBlackMean);
 
   // noise estimate: mean color difference between ref and ref_blurred
   const refBlurred = blurPlane(gpu, refCropped, blurKernelSize, mosaic);
@@ -99,6 +100,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
 
     const alignedPadded = alignTexture(gpu, refPyramid, compPadded, {
       nLevels, downscaleFactorArray, tileSizeArray,
+      compBlackMean: Math.max(0, comp.blackLevel.reduce((a, b) => a + b, 0) / comp.blackLevel.length),
     });
     const aligned = crop(gpu, alignedPadded, padX, padY);
 
@@ -167,13 +169,17 @@ async function prepareFrame(gpu, frame, padX, padY, black4) {
   return out;
 }
 
-function buildPyramid(gpu, basePadded, downscaleFactorArray) {
-  const pyramid = [basePadded];
-  let cur = basePadded;
+// Port of build_pyramid(): level 0 is avg_pool(scale = downscale_list[0], black_level_mean),
+// level i is avg_pool(blur(level i-1, kernel 2, mosaic 1), scale = downscale_list[i]).
+// Note the pyramid BASE is therefore HALF the padded resolution for Bayer (downscale_list[0]
+// = mosaic_pattern_width = 2) — tile grids and the warp are defined on that half-res base.
+function buildPyramid(gpu, basePadded, downscaleFactorArray, blackMean) {
+  const pyramid = [avgPool(gpu, basePadded, downscaleFactorArray[0], blackMean)];
+  let cur = pyramid[0];
   for (let i = 1; i < downscaleFactorArray.length; i++) {
     const scale = downscaleFactorArray[i];
     const b1 = blurPlane(gpu, cur, 2, 1);
-    const pooled = avgPool(gpu, b1, scale);
+    const pooled = avgPool(gpu, b1, scale, 0.0);
     b1.buf.destroy();
     pyramid.push(pooled);
     cur = pooled;
@@ -192,13 +198,13 @@ function blurPlane(gpu, plane, kernelSize, mosaicPatternWidth) {
   return out;
 }
 
-function avgPool(gpu, plane, scale) {
+function avgPool(gpu, plane, scale, blackLevel) {
   const outW = Math.floor(plane.w / scale);
   const outH = Math.floor(plane.h / scale);
   const out = new Plane(gpu.zeros('pool-out', outW * outH * 4), outW, outH);
   gpu.dispatch('avg_pool',
     [{ buffer: plane.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'f32'], [plane.w, outW, scale, 0.0]) }], groups(outW, outH));
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'f32'], [plane.w, outW, scale, blackLevel]) }], groups(outW, outH));
   return out;
 }
 
@@ -221,8 +227,8 @@ function upsampleNearest(gpu, align, outW, outH) {
 }
 
 // Port of align_texture(): coarse-to-fine pyramid alignment.
-function alignTexture(gpu, refPyramid, compPadded, { nLevels, downscaleFactorArray, tileSizeArray }) {
-  const compPyramid = buildPyramid(gpu, compPadded, downscaleFactorArray);
+function alignTexture(gpu, refPyramid, compPadded, { nLevels, downscaleFactorArray, tileSizeArray, compBlackMean }) {
+  const compPyramid = buildPyramid(gpu, compPadded, downscaleFactorArray, compBlackMean);
 
   // 1x1 initial alignment (all zeros)
   let prevAlign = new Plane(gpu.zeros('align-0', 16), 1, 1);

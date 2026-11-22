@@ -43,10 +43,14 @@ function rational(num, den = 1) {
  */
 export function writeDNG(pixels, meta) {
   const { width, height } = meta;
+  const orientation = Number.isFinite(meta.orientation) && meta.orientation >= 1 && meta.orientation <= 8 ? meta.orientation : 1;
 
   const blackLevels = Array.isArray(meta.blackLevel) ? meta.blackLevel : [meta.blackLevel];
-  // DNG allows one BlackLevel value with repeat dim [1,1]; use the max of per-cell values
-  const black = Math.max(...blackLevels.map((b) => (Number.isFinite(b) ? b : 0)));
+  const perCell = blackLevels.length === 4 && blackLevels.every((b) => Number.isFinite(b));
+  // per-cell (2×2 repeat) black level when available, else a single value
+  const blackTag = perCell
+    ? new IFDEntry(50714, RATIONAL, blackLevels.map((b) => rational(b)))  // BlackLevel
+    : new IFDEntry(50714, RATIONAL, [rational(Math.max(...blackLevels.map((b) => (Number.isFinite(b) ? b : 0))))]);
   const white = Number.isFinite(meta.whiteLevel) && meta.whiteLevel > 0 ? meta.whiteLevel : 65535;
   const cfa = meta.cfa && meta.cfa.length === 4 ? meta.cfa : [0, 1, 1, 2]; // RGGB fallback
 
@@ -57,6 +61,7 @@ export function writeDNG(pixels, meta) {
     new IFDEntry(258, SHORT, [16]),                      // BitsPerSample
     new IFDEntry(259, SHORT, [1]),                       // Compression: none
     new IFDEntry(262, SHORT, [32803]),                   // PhotometricInterpretation: CFA
+    new IFDEntry(274, SHORT, [orientation]),             // Orientation
     new IFDEntry(273, LONG, [0]),                        // StripOffsets (patched)
     new IFDEntry(277, SHORT, [1]),                       // SamplesPerPixel
     new IFDEntry(278, LONG, [height]),                   // RowsPerStrip
@@ -67,13 +72,13 @@ export function writeDNG(pixels, meta) {
     new IFDEntry(50706, BYTE, [1, 4, 0, 0]),             // DNGVersion
     new IFDEntry(50707, BYTE, [1, 1, 0, 0]),             // DNGBackwardVersion
     new IFDEntry(50708, ASCII, strBytes(meta.model ? `${meta.make || ''} ${meta.model}` : 'hdr-plus-web')),
-    new IFDEntry(50714, RATIONAL, [rational(black)]),    // BlackLevel
-    new IFDEntry(50715, SHORT, [1, 1]),                  // BlackLevelRepeatDim
+    blackTag,
+    new IFDEntry(50713, SHORT, perCell ? [2, 2] : [1, 1]),  // BlackLevelRepeatDim (0xC619)
     new IFDEntry(50717, LONG, [white]),                  // WhiteLevel
   ];
 
   if (meta.colorMatrix && meta.colorMatrix.length === 9) {
-    entries.push(new IFDEntry(50721, SRATIONAL, meta.colorMatrix.map((v) => rational(v, 10000)))); // ColorMatrix1
+    entries.push(new IFDEntry(50721, SRATIONAL, meta.colorMatrix.map((v) => rational(Math.round(v * 10000), 10000)))); // ColorMatrix1
     entries.push(new IFDEntry(50778, SHORT, [21]));      // CalibrationIlluminant1: D65
   }
   entries.sort((a, b) => a.tag - b.tag);

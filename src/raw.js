@@ -39,7 +39,7 @@ async function loadFlashraw() {
         }
       }
       throw new Error(
-        `Failed to load flashraw (${lastErr?.message}). Run \`npm install flashraw\` in hdr-plus-web/ — the WASM binaries are import.meta.url assets and are served reliably from a local install.`
+        `Failed to load flashraw (${lastErr?.message}). Run \`npm install flashraw\` in burst-photo-web/ — the WASM binaries are import.meta.url assets and are served reliably from a local install.`
       );
     })();
   }

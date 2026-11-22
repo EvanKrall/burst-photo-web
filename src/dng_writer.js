@@ -82,7 +82,7 @@ export function writeDNG(pixels, meta) {
   const perCell = blackLevels.length === 4 && blackLevels.every((b) => Number.isFinite(b));
   const white = Number.isFinite(meta.whiteLevel) && meta.whiteLevel > 0 ? meta.whiteLevel : 65535;
   const cfa = meta.cfa && meta.cfa.length === 4 ? meta.cfa : [0, 1, 1, 2]; // RGGB fallback
-  const cameraName = meta.model ? `${meta.make || ''} ${meta.model}`.trim() : 'hdr-plus-web';
+  const cameraName = meta.model ? `${meta.make || ''} ${meta.model}`.trim() : 'burst-photo-web';
   const dt = tiffDateTime(meta.exif?.captureTime);
 
   // ---- IFD0 ----
@@ -99,7 +99,7 @@ export function writeDNG(pixels, meta) {
     new IFDEntry(278, LONG, [height]),                   // RowsPerStrip
     new IFDEntry(279, LONG, [width * height * 2]),       // StripByteCounts
     new IFDEntry(284, SHORT, [1]),                       // PlanarConfiguration: chunky
-    new IFDEntry(305, ASCII, strBytes('hdr-plus-web (Burst Photo PoC)')), // Software
+    new IFDEntry(305, ASCII, strBytes('burst-photo-web (Burst Photo PoC)')), // Software
     new IFDEntry(33421, SHORT, [2, 2]),                  // CFARepeatPatternDim
     new IFDEntry(33422, BYTE, cfa),                      // CFAPattern
     new IFDEntry(50706, BYTE, [1, 4, 0, 0]),             // DNGVersion

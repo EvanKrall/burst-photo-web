@@ -1,5 +1,5 @@
 {
-  "name": "hdr-plus-web",
+  "name": "burst-photo-web",
   "version": "0.1.0",
   "description": "Proof-of-concept web port of Burst Photo (HDR+ burst denoising) \u2014 HTML5 + flashraw + WebGPU",
   "type": "module",

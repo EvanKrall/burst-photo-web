@@ -1,4 +1,4 @@
-# HDR+ Web (proof of concept)
+# Burst Photo Web (proof of concept)
 
 A browser-based proof-of-concept port of [Burst Photo](https://github.com/martin-marek/hdr-plus-swift)
 (Google's HDR+ burst-photography pipeline in Swift/Metal), rebuilt with:
@@ -38,7 +38,7 @@ motion-rejected). Both suites currently pass.
 ## Running
 
 ```bash
-cd hdr-plus-web
+cd burst-photo-web
 npm install       # fetches flashraw (~1 MB JS + WASM binaries served locally)
 npm start         # zero-dependency static server on http://localhost:8080
 ```

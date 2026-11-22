@@ -33,5 +33,5 @@ createServer(async (req, res) => {
     res.end('not found');
   }
 }).listen(port, () => {
-  console.log(`hdr-plus-web running at http://localhost:${port}`);
+  console.log(`burst-photo-web running at http://localhost:${port}`);
 });

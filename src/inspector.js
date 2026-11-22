@@ -826,6 +826,7 @@ export class InspectorUI {
         [offsetX, offsetY] = this.session.texelOffset(req.idx, req.params.anchor.tileX, req.params.anchor.tileY);
       }
       const { bitmap, info } = await this.session.renderFrame(req.idx, { ...req.params, offsetX, offsetY });
+      const prevBmp = this.currentBitmap;
       this.currentBitmap = bitmap;
       this.state.renderedInfo = info;
       const ctx = this.el.canvas.getContext('2d');
@@ -833,12 +834,25 @@ export class InspectorUI {
       this.el.canvas.height = bitmap.height;
       ctx.putImageData(new ImageData(bitmap.rgba, bitmap.width, bitmap.height), 0, 0);
       this.el.holder.classList.toggle('pixelated', MODE_IS_ALIGNMENT(req.params.mode));
-      if (this.state.zoom === 1) {
+      // baseScale belongs to the bitmap, not the zoom level: recompute when the bitmap
+      // dims change (mode switches — alignment's tile-grid bitmap is tiny compared to
+      // the photo views) or the pane box changed since the last fit. Zoom then applies
+      // uniformly on top, so the alignment view fills the pane at any zoom instead of
+      // reusing the photo views' sub-1 fit scale and shrinking to a thumbnail.
+      const dimsChanged = !prevBmp || prevBmp.width !== bitmap.width || prevBmp.height !== bitmap.height;
+      const wrapKey = `${this.el.imageWrap.clientWidth}x${this.el.imageWrap.clientHeight}`;
+      if (dimsChanged || wrapKey !== this._baseScaleWrap) {
         this.baseScale = this.baseScaleFor(bitmap);
-        this.applyCanvasSize();
-        this.el.zoomBadge.hidden = true;
-      } else {
-        this.applyCanvasSize();
+        this._baseScaleWrap = wrapKey;
+      }
+      this.applyCanvasSize();
+      this.el.zoomBadge.hidden = this.state.zoom === 1;
+      if (dimsChanged) {
+        // a mode switch resizes the canvas; center it so the transition is deterministic
+        // (same-dims renders — frame scrubs, anchor edits — keep the scroll exactly)
+        const wrap = this.el.imageWrap;
+        wrap.scrollLeft = Math.max(0, (this.el.canvas.clientWidth - wrap.clientWidth) / 2);
+        wrap.scrollTop = Math.max(0, (this.el.canvas.clientHeight - wrap.clientHeight) / 2);
       }
       this.drawOverlay();
       this.refreshStatsBar();

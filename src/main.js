@@ -12,6 +12,7 @@ import { alignMergeSpatial } from './pipeline.js';
 import { performInspection } from './inspect.js';
 import { InspectorUI } from './inspector.js';
 import { decodeRaw, developPreview } from './raw.js';
+import { detectAfAreaRoi } from './af_area.js';
 import { writeDNG } from './dng_writer.js';
 import { renderPreview } from './preview.js';
 
@@ -196,7 +197,7 @@ async function loadFiles(fileList) {
           throw new Error(`${f.name}: resolution ${frame.width}x${frame.height} differs from ${ref.width}x${ref.height}`);
         }
       }
-      loadedFrames.push({ name: f.name, ...frame });
+      loadedFrames.push({ name: f.name, file: f, ...frame });
       log(`${f.name}: ${frame.width}x${frame.height}, black=${JSON.stringify(frame.blackLevel)}, white=${frame.whiteLevel} (${ms} ms)`);
       await yieldToUI();
     }
@@ -227,6 +228,15 @@ const yieldToUI = () => new Promise((r) => setTimeout(r, 0));
 async function runInspection() {
   if (decoding || processing || loadedFrames.length < 2) return;
   setProgress(0, 'aligning…');
+  const refIdx = Math.floor(loadedFrames.length / 2);
+  // AF-area detection runs in parallel with the alignment: WASM exiftool on the
+  // reference frame's maker notes (lazy-loaded — the ~25 MB interpreter downloads on
+  // the first inspection only). The result becomes the default subject area unless the
+  // user has already drawn one by the time it arrives.
+  const refFile = loadedFrames[refIdx].file;
+  const afRoiPromise = detectAfAreaRoi(refFile.name, refFile)
+    .then((roi) => ({ roi, error: null }))
+    .catch((err) => ({ roi: null, error: err?.message || String(err) }));
   try {
     log('Initializing WebGPU…');
     const { adapter, device } = await initGPU();
@@ -236,7 +246,7 @@ async function runInspection() {
     const options = {
       tileSize: Number(document.getElementById('tileSize').value),
       searchDistance: Number(document.getElementById('searchDistance').value),
-      refIdx: Math.floor(loadedFrames.length / 2),
+      refIdx,
     };
     log(`Aligning ${loadedFrames.length} frames for inspection (tile=${options.tileSize}, search=${options.searchDistance})…`);
     const session = await performInspection(gpu, loadedFrames, options, (p) => {
@@ -255,6 +265,21 @@ async function runInspection() {
       },
     });
     window.__inspector = inspector; // exposed for tests
+    // apply the AF area (if any) as the subject area — by now it has usually finished
+    // downloading/running alongside the alignment
+    const { roi: afRoi, error: afError } = await afRoiPromise;
+    if (afRoi) {
+      const pct = (v) => Math.round(v * 100);
+      if (inspector.applyAfAreaRoi(afRoi)) {
+        log(`AF area from ${refFile.name} maker notes: x ${pct(afRoi.x0)}-${pct(afRoi.x1)}%, y ${pct(afRoi.y0)}-${pct(afRoi.y1)}% — using it as the subject area.`);
+      } else {
+        log(`AF area found, but you already set a subject area — keeping yours.`);
+      }
+    } else if (afError) {
+      log(`AF-area detection failed (${afError}) — subject area defaults to the centered half.`);
+    } else {
+      log(`No AF area metadata in the reference frame (currently decoded for Nikon Z bodies) — subject area defaults to the centered half.`);
+    }
     log('Merge the checked frames with the button in the inspector (or "Process burst" with all frames).');
   } catch (err) {
     log(`ERROR: ${err.message}`);

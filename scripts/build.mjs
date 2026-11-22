@@ -43,9 +43,21 @@ async function main() {
   }
   await cp(flashrawDist, join(dist, 'vendor', 'flashraw', 'dist'), { recursive: true });
 
+  // exiftool (vendored: the bare '@6over3/zeroperl-ts' specifier is rewritten to a
+  // relative path by scripts/vendor.mjs; the 25 MB WASM Perl interpreter is a lazy
+  // dynamic import from src/af_area.js and must sit next to the rewritten module)
+  const exiftoolVendor = join(root, 'vendor', 'exiftool');
+  try {
+    await stat(join(exiftoolVendor, 'zeroperl.wasm'));
+  } catch {
+    console.error('vendor/exiftool not found — run `npm run vendor` (npm install does this automatically).');
+    process.exit(1);
+  }
+  await cp(exiftoolVendor, join(dist, 'vendor', 'exiftool'), { recursive: true });
+
   // summary
   console.log('dist/ built:');
-  for (const entry of ['index.html', 'src', 'vendor/flashraw/dist']) {
+  for (const entry of ['index.html', 'src', 'vendor/flashraw/dist', 'vendor/exiftool']) {
     console.log(`  ${entry.padEnd(28)} ${await sizeKB(join(dist, entry))}`);
   }
   const wasm = (await readdir(join(dist, 'vendor', 'flashraw', 'dist'))).filter((f) => f.endsWith('.wasm'));

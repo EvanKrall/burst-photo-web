@@ -131,6 +131,11 @@ A local flashraw install is the reliable path: its `.wasm` binaries are
 with the correct MIME type from `node_modules/`. CDN imports (jsDelivr/esm.sh)
 are attempted as fallback but are best-effort.
 
+`npm install` (or `npm run vendor`) also materializes `vendor/exiftool/` from
+the `@uswriting/exiftool` package — the lazy-loaded WASM exiftool used for
+AF-area detection. `npm start` serves it from the repo root; `npm run build`
+copies it into `dist/`.
+
 Headless check of the DNG writer + flashraw integration (no browser needed,
 flashraw also runs in Node):
 
@@ -151,6 +156,9 @@ src/inspect.js        alignment inspection session (port of inspect/inspect.swif
                       difference rendering, background calibration, ROI scoring
 src/viz.js            CPU visualization + scoring math (port of viz/visualize.swift):
                       alignment-field renderer, robust brightness matching, ROI metrics
+src/af_area.js        reference-frame autofocus-area detection via WASM exiftool
+                      (@uswriting/exiftool under zeroperl — lazy-loaded, ~25 MB, run on
+                      the reference frame only) → default inspector subject area
 src/inspector.js      inspection UI (port of inspect/AlignmentInspectorView.swift):
                       frame list with scores/checkboxes, zoomable image with anchor
                       point + subject-area selection, render queue, merge bar
@@ -186,11 +194,19 @@ the surviving frames. A background calibration pass (pooled values, per-
 frame brightness matches, thumbnail data) warms the caches and measures the
 shared difference scale.
 
-Not ported from the Swift branch: reading the reference frame's autofocus
-area from Nikon maker notes (flashraw does not expose AF metadata — the
-subject area defaults to the centered half of the frame), and stack
-record files (a browser can't write next to the download; re-open the
-original RAWs instead).
+The default subject area is the camera's autofocus area when the reference
+frame's maker notes carry it: a WASM exiftool (@uswriting/exiftool — the
+full exiftool under a WASM Perl interpreter, vendored into `vendor/exiftool/`
+by `npm install`/`npm run vendor`) reads `AFAreaXPosition/YPosition/Width/
+Height` from the reference frame while the burst is still aligning, and the
+result becomes the subject area unless you have already drawn one. The
+interpreter (~25 MB) downloads lazily on the first inspection and is run on
+the reference frame only (~0.5 s). Verified for Nikon Z bodies; other makes
+fall back to the centered half of the frame.
+
+Not ported from the Swift branch: stack record files (a browser can't write
+next to the download; re-open the original RAWs instead). The Swift branch's
+Nikon AF-area maker-note parsing is covered by the WASM exiftool above.
 
 Images are handled as **storage buffers** (`array<f32>` planes), not textures:
 the Metal code reads/writes texels only via explicit `.read()/.write()` (no

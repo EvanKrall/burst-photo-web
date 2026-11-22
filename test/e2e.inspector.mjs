@@ -142,6 +142,19 @@ try {
   check('merge enabled for all frames', !insp.mergeDisabled, insp.mergeText);
   check('stats line names the selected frame', /frame 0/.test(insp.stats), insp.stats.slice(0, 60));
 
+  // AF-area detection (lazy WASM exiftool on the reference frame) must resolve and report
+  // a definite outcome — the synthetic DNGs carry no AF metadata, so the fallback must be
+  // logged (a fetch/path misconfiguration would show up as the failure branch instead)
+  await page.waitForFunction(() => {
+    const text = document.getElementById('log').textContent;
+    return text.includes('No AF area metadata') || text.includes('AF area from') || text.includes('AF-area detection failed');
+  }, { timeout: 120000 });
+  const afLog = await page.evaluate(() => {
+    const lines = document.getElementById('log').textContent.split('\n');
+    return lines.find((l) => l.includes('AF area') || l.includes('AF-area'));
+  });
+  check('AF-area detection reports a definite outcome', /No AF area metadata/.test(afLog), afLog?.trim());
+
   // wait for calibration to finish: every comparison row's diff score must become a number
   // (the reference row shows "–" by design — it has no alignment field to score)
   await page.waitForFunction(() => {

@@ -16,9 +16,9 @@
 //   mode fits the brightness match locally and robustly around it instead of globally.
 // - Dragging on the image marks the SUBJECT AREA (region of interest). Both scores in the frame
 //   list — mean brightness-matched difference and alignment-field variation — are computed inside
-//   it; the list can be sorted by either. The default subject area is the centered half of the
-//   frame (the Swift app additionally reads the reference frame's AF point from Nikon maker
-//   notes, which flashraw does not expose).
+//   it; the list can be sorted by either. The default subject area comes from the reference
+//   frame's autofocus-area metadata when available (src/af_area.js, WASM exiftool — the Swift
+//   app reads the same maker-note tags natively), otherwise it is the centered half of the frame.
 // - The frame list supports checking/unchecking images (excluded from the merge), and multi-
 //   selection with cmd-click (toggle one) and shift-click (toggle a range).
 // - Arrow keys scrub through frames IN LOCKSTEP with the preview: while a render is in flight,
@@ -35,9 +35,12 @@ const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 export class InspectorUI {
   /**
    * @param {InspectionSession} session from performInspection()
-   * @param {{ onMerge: (includedFrames: Array) => void }} handlers
+   * @param {{ onMerge: (includedFrames: Array) => void,
+   *           initialRoi?: {x0:number,y0:number,x1:number,y1:number}|null }} opts
+   *   initialRoi: subject area detected from the reference frame's AF metadata; when
+   *   omitted (or arriving late via applyAfAreaRoi), the centered half is used.
    */
-  constructor(session, { onMerge }) {
+  constructor(session, { onMerge, initialRoi = null }) {
     this.session = session;
     this.onMerge = onMerge;
 
@@ -84,7 +87,8 @@ export class InspectorUI {
       matchExposure: true,
       anchor: null, // {u, v, tileX, tileY} | null
       anchorManual: false,
-      roi: { x0: 0.25, y0: 0.25, x1: 0.75, y1: 0.75 }, // default subject area: centered half
+      roi: initialRoi || { x0: 0.25, y0: 0.25, x1: 0.75, y1: 0.75 }, // default subject area: centered half
+      roiTouched: false, // set once the user edits the area themselves (blocks late AF-area results)
       sortMode: 0,
       zoom: 1,
       renderedInfo: '',
@@ -425,8 +429,31 @@ export class InspectorUI {
     this.setMode(MODES[next]);
   }
 
+  /**
+   * Apply an AF-area-derived subject area (arrives asynchronously — WASM exiftool run on
+   * the reference frame). Ignored when the user has already edited the area themselves
+   * or the view is disposed. Returns true when the area was applied.
+   */
+  applyAfAreaRoi(roi) {
+    if (!roi || this.aborted) return false;
+    if (this.state.roiTouched) return false;
+    this.state.roi = roi;
+    // programmatic update: the user still has not touched the area (and the anchor
+    // follows it until taken manually)
+    this.el.clearRoi.hidden = false;
+    if (!this.state.anchorManual) {
+      this.state.anchor = this.sceneAnchor((roi.x0 + roi.x1) / 2, (roi.y0 + roi.y1) / 2);
+      this.refreshToolbar();
+    }
+    this.refreshScores();
+    this.drawOverlay();
+    this.scheduleRender();
+    return true;
+  }
+
   setRoi(roi) {
     this.state.roi = roi;
+    this.state.roiTouched = true; // user edit: block late AF-area results
     this.el.clearRoi.hidden = !roi;
     // while the user has not taken manual control of the anchor, it follows the subject area
     if (!this.state.anchorManual) {

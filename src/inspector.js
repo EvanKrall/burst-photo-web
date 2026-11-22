@@ -463,10 +463,14 @@ export class InspectorUI {
       if (selection.has(idx)) selection.delete(idx);
       else selection.add(idx);
     } else if (shift) {
-      const lower = Math.min(this.state.lastClicked, idx);
-      const upper = Math.max(this.state.lastClicked, idx);
-      const range = new Set();
-      for (let i = lower; i <= upper; i++) range.add(i);
+      // the range follows the current display order (capture order or score-sorted), not the
+      // raw frame indices — the rows the user sees between the anchor and the clicked row
+      const order = this.displayIndices();
+      const a = order.indexOf(this.state.lastClicked);
+      const b = order.indexOf(idx);
+      const range = new Set(a !== -1 && b !== -1
+        ? order.slice(Math.min(a, b), Math.max(a, b) + 1)
+        : [idx]);
       if (selection.has(idx)) for (const i of range) selection.delete(i);
       else for (const i of range) selection.add(i);
     } else {

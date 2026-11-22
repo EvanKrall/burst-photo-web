@@ -183,6 +183,34 @@ try {
     document.querySelector('#inspColHead button.active')?.dataset.sort);
   check('sort header marks the active column', activeHeader === '2', `active=${activeHeader}`);
 
+  // shift-click range selection must follow the display order, not the capture order: with
+  // a_ref (display pos 1) as anchor, shift-clicking the last row selects exactly the three
+  // rows seen between them — the old capture-order range (idx 0..3) would include the
+  // pinned reference row too
+  await page.evaluate(() => {
+    [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-file').textContent === 'a_ref.dng')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.insp-row')];
+    rows[rows.length - 1].dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  const selNames = await page.evaluate(() =>
+    [...document.querySelectorAll('.insp-row.selected .insp-file')].map((e) => e.textContent));
+  check('shift-click selects the display-order range',
+    JSON.stringify(selNames) === JSON.stringify(['a_ref.dng', 'b_shifted.dng', 'd_subject.dng']),
+    selNames.join(','));
+  // reset to a single selection so the following exclusion step is unaffected
+  await page.evaluate(() => {
+    [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-file').textContent === 'd_subject.dng')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await new Promise((r) => setTimeout(r, 300));
+
   // exclude the subject frame via its checkbox
   await page.evaluate(() => {
     const row = [...document.querySelectorAll('.insp-row')]

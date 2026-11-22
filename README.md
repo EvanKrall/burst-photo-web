@@ -176,8 +176,17 @@ kernels.
 
 ## Next steps
 
-- Decode in Web Workers (parallel flashraw instances) + OPFS caching
+- Decode in Web Workers (flashraw ships `createWorkerPool` from `flashraw/worker`
+  for exactly this — parallel decode with per-request cancellation) + OPFS caching.
+  Threads need COOP/COEP headers; without them the single-threaded build is used
+  and "nothing else changes".
 - Frequency-domain merge (tiled FFT) for "higher quality" mode
 - `correct_upsampling_error` + `compute_tile_differences25`
 - Exposure bracketing + exposure correction
 - Hot-pixel suppression
+- Note on a tempting optimization: flashraw can decode straight to GPU-resident
+  buffers (`output: 'gpu-raw-u16'`, `init({ gpu: true })`), but those buffers live
+  on **flashraw's own GPUDevice** ("passing in an application-created GPUDevice is
+  not supported") — integrating that with this pipeline's device would mean
+  restructuring around `getGpuDevice()`. CPU decode + our own upload is fine for now
+  (upload is ~50ms per 24MP frame over PCIe).

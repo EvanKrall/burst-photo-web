@@ -185,6 +185,9 @@ alignment grids. The session then renders, on demand and per selected frame:
   an inlier-maximizing robust fit around the anchor.
 - **Original / Warped / Reference** — tonemapped raw previews (the original
   optionally shifted through the anchor's tile so it stays registered).
+- **Merged** (appears after merging from the inspector) — the tonemapped
+  merged result as a burst-level view; the inspection stays alive so you can
+  go back to scoring and re-merge with a different frame selection.
 
 Every frame is scored inside the subject area — mean brightness-matched
 difference and alignment-field variation (mean per-tile deviation from the
@@ -193,11 +196,15 @@ frame rejection) — and the list sorts by either. Frames excluded via their
 checkbox are left out of the merge. Merging from the inspector keeps the
 inspection's reference frame and feeds the inspection's per-frame
 alignment grids straight into the merge — the per-frame pyramid search is
-skipped entirely (verified bit-identical against a full align+merge).
-Changing the tile size / search distance between inspection and merge, or
-excluding the inspection reference, falls back to a full re-alignment.
-A plain "Process burst" (no inspection) still aligns from scratch and picks
-the center of the frame list as its reference (Burst Photo default). A
+skipped entirely (verified bit-identical against a full align+merge) —
+and returns to the inspection view with the result as an extra "Merged"
+view ("Preview & download" opens the DNG preview pane). The session stays
+alive, so scoring and re-merging with a different frame selection costs
+no new alignment. Changing the tile size / search distance between
+inspection and merge, or excluding the inspection reference, falls back
+to a full re-alignment. A plain "Process burst" without an inspection
+view still aligns from scratch, picks the center of the frame list as its
+reference (Burst Photo default) and finishes on the preview pane. A
 background calibration pass (pooled values, per-frame brightness matches,
 thumbnail data) warms the caches and measures the shared difference scale.
 

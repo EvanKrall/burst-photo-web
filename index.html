@@ -175,6 +175,7 @@
     #inspMergeText { font-size: 0.75rem; color: #8a929c; flex: 1; }
     #inspMerge { font-size: 0.85rem; padding: 0.35rem 1rem; cursor: pointer; }
     #inspMerge:disabled { opacity: 0.4; cursor: default; }
+    #inspOpenPreview { font-size: 0.75rem; padding: 0.3rem 0.8rem; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -265,6 +266,7 @@
             <button data-mode="original">Original</button>
             <button data-mode="warped">Warped</button>
             <button data-mode="reference">Reference</button>
+            <button id="inspMergedMode" data-mode="merged" hidden>Merged</button>
           </div>
           <span class="insp-ctl" id="inspAlignControls" hidden>
             <label class="insp-ctl"><input type="checkbox" id="inspAlignShared" checked> Shared scale</label>
@@ -307,6 +309,7 @@
         </div>
         <div id="inspMergeBar">
           <span id="inspMergeText"></span>
+          <button id="inspOpenPreview" hidden title="Open the merged DNG preview pane">Preview &amp; download</button>
           <button id="inspMerge" class="primary">Merge</button>
         </div>
       </section>

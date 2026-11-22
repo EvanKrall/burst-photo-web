@@ -77,6 +77,34 @@ export function renderAlignmentField(texels, width, height, { scale = 8, offsetX
   return { rgba, width, height };
 }
 
+/**
+ * Block-average a single-channel Uint16Array image into a Float32Array of outW×outH
+ * cell means. Each cell covers a floor(width/outW) × floor(height/outH) sample box
+ * (edge cells clamp); used for the tonemapped overview of the merged result, the CPU
+ * counterpart of the GPU pooled reads behind the other photo views.
+ */
+export function downsampleU16(pixels, width, height, outW, outH) {
+  const out = new Float32Array(outW * outH);
+  const cellW = Math.max(1, Math.floor(width / outW));
+  const cellH = Math.max(1, Math.floor(height / outH));
+  for (let oy = 0; oy < outH; oy++) {
+    const y0 = Math.min(oy * cellH, height - 1);
+    const y1 = Math.min(y0 + cellH, height);
+    for (let ox = 0; ox < outW; ox++) {
+      const x0 = Math.min(ox * cellW, width - 1);
+      const x1 = Math.min(x0 + cellW, width);
+      let sum = 0, n = 0;
+      for (let y = y0; y < y1; y++) {
+        let i = y * width + x0;
+        for (let x = x0; x < x1; x++, i++) sum += pixels[i];
+        n += x1 - x0;
+      }
+      out[oy * outW + ox] = n ? sum / n : 0;
+    }
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ ROI scoring
 
 /**

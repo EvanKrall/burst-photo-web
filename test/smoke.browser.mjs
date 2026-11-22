@@ -235,6 +235,7 @@ try {
     // pixel-identical output to a full align+merge — the grids are the exact texels
     // alignTextureEx computes, so reuse must only skip the pyramid search
     const t8 = {};
+    let t9 = null;
     {
       const frames8 = [mkFrame(0, 0), mkFrame(2, 1), mkFrame(-1, 2)];
       const r8full = await alignMergeSpatial(gpu, frames8, opts, null);
@@ -255,6 +256,21 @@ try {
       t8.maxDelta = maxDelta;
       // grid dims must line up with what the merge derives (otherwise warpWithGrid throws)
       t8.gridDims = `${session8.tileInfo.w}×${session8.tileInfo.h}`;
+
+      // T9: the merged result can be rendered as a session view (the inspector's "Merged"
+      // tab): box-averaged, tonemapped to the brightest block, cached per output size
+      session8.mergedResult = {
+        pixels: r8reuse.pixels, width: r8reuse.width, height: r8reuse.height,
+        blackLevel: BLACK, whiteLevel: WHITE, count: frames8.length, name: 'synth',
+      };
+      const m1 = await session8.renderFrame(0, { mode: 'merged', outWidth: 32, outHeight: 32 });
+      const m2 = await session8.renderFrame(1, { mode: 'merged', outWidth: 32, outHeight: 32 }); // cache hit
+      const lit = (b) => {
+        let n = 0;
+        for (let i = 0; i < b.rgba.length; i += 4) if (b.rgba[i] + b.rgba[i + 1] + b.rgba[i + 2] > 12) n++;
+        return n / (b.rgba.length / 4);
+      };
+      t9 = { lit: lit(m1.bitmap), cached: m1.bitmap === m2.bitmap, info: m1.info };
       session8.destroy();
     }
     session.destroy();
@@ -271,6 +287,7 @@ try {
             progress: session.calibrationProgress },
       t6: renders,
       t8,
+      t9,
       t7,
     };
   });
@@ -314,6 +331,8 @@ try {
     }
     check('T8 reuse-merge output is pixel-identical to a full align+merge', out.t8.identical,
       `maxDelta=${out.t8.maxDelta} grid=${out.t8.gridDims} reuseMs=${out.t8.reuseMs?.toFixed(0)}`);
+    check('T9 merged view renders non-trivial output (cached across frames)', out.t9 && out.t9.lit > 0.1 && out.t9.cached,
+      `lit=${((out.t9?.lit || 0) * 100).toFixed(0)}% cached=${out.t9?.cached} — ${(out.t9?.info || '').slice(0, 70)}`);
     check('T7 ref difference render produces output', out.t7.refDiff > 0.1,
       `nonBlack=${(out.t7.refDiff * 100).toFixed(0)}%`);
     for (const k of ['refAfter', 'origAfter', 'diffAfter', 'warpedAfter']) {

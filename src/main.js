@@ -123,6 +123,7 @@ function disposeInspector() {
     window.__inspector = undefined;
     inspector = null;
   }
+  inspectionReuse = null;
 }
 
 // ---- drag & drop + right-pane switching ----
@@ -224,6 +225,10 @@ async function loadFiles(fileList) {
 
 const yieldToUI = () => new Promise((r) => setTimeout(r, 0));
 
+// Captures the live inspection session's alignment grids for a merge (null while no
+// inspection view exists). Set by runInspection, cleared by disposeInspector.
+let inspectionReuse = null;
+
 // ---- alignment inspection (pre-merge review) ----
 async function runInspection() {
   if (decoding || processing || loadedFrames.length < 2) return;
@@ -272,13 +277,16 @@ async function runInspection() {
         [f.idx, f.isRef ? null : { texels: f.texels, w: session.tileInfo.w, h: session.tileInfo.h }]));
       return { refCaptureIdx: options.refIdx, grids };
     };
+    inspectionReuse = alignmentReuse; // also used by the "Process burst" button
     inspector = new InspectorUI(session, {
-      onMerge: (includedIndices) => {
+      onOpenPreview: () => showPane('preview'),
+      onMerge: async (includedIndices) => {
         const reuse = alignmentReuse();
-        // release the inspection view (and its GPU memory) before the merge reloads everything
-        disposeInspector();
+        // the inspection view STAYS ALIVE: its grids keep enabling alignment reuse on
+        // re-merges, and the merged result is handed back as an extra "Merged" view
+        // instead of replacing the whole inspection
         showPane('progress');
-        processBurst(includedIndices, reuse);
+        await processBurst(includedIndices, { reuse, returnToInspector: true });
       },
     });
     window.__inspector = inspector; // exposed for tests
@@ -308,8 +316,12 @@ async function runInspection() {
 // ---- processing ----
 // frameIndices: optional list of indices into loadedFrames to merge (inspector selection);
 // defaults to every loaded frame. The reference is the center frame of the merged list.
-async function processBurst(frameIndices = null, reuse = null) {
-  if (decoding || processing || loadedFrames.length < 2) return;
+async function processBurst(frameIndices = null, { reuse = null, returnToInspector = false } = {}) {
+  if (decoding || processing) {
+    log('Still working — wait for the current operation to finish first.');
+    return null;
+  }
+  if (loadedFrames.length < 2) return null;
   const tAll = performance.now(); // wall time of the whole merge (for the final summary)
   const indices = frameIndices && frameIndices.length >= 2
     ? frameIndices
@@ -443,9 +455,29 @@ async function processBurst(frameIndices = null, reuse = null) {
       ctx.putImageData(new ImageData(preview.rgba, preview.width, preview.height), 0, 0);
     }
 
-    showPane('preview');
-    setProgress(stageProgress('preview', 1), 'done');
-    log(`Done in ${((performance.now() - tAll) / 1000).toFixed(2)} s (wall). Preview: flashraw-developed; download the DNG for full quality in your RAW converter.`);
+    // hand the result to the inspection view (extra "Merged" tab) or finish on the preview
+    const payload = {
+      pixels: result.pixels,
+      width: result.width,
+      height: result.height,
+      blackLevel: refMeta.blackLevel,
+      whiteLevel: refMeta.whiteLevel,
+      count: frames.length,
+      name: refMeta.name,
+      noiseSd: result.noiseSd,
+      wallMs: performance.now() - tAll,
+    };
+    if (returnToInspector && inspector) {
+      inspector.setMerged(payload);
+      showPane('inspector');
+      setProgress(stageProgress('preview', 1), 'done');
+      log(`Merged result added to the inspector as the "Merged" view (${(payload.wallMs / 1000).toFixed(2)} s wall) — the DNG is on the preview pane.`);
+    } else {
+      showPane('preview');
+      setProgress(stageProgress('preview', 1), 'done');
+      log(`Done in ${((performance.now() - tAll) / 1000).toFixed(2)} s (wall). Preview: flashraw-developed; download the DNG for full quality in your RAW converter.`);
+    }
+    return payload;
   } catch (err) {
     log(`ERROR: ${err.message}`);
     console.error(err);
@@ -458,8 +490,10 @@ async function processBurst(frameIndices = null, reuse = null) {
 
 processBtn.addEventListener('click', () => {
   // with an active inspection session, "Process burst" merges the frames the inspector has
-  // still checked (same as the inspector's Merge button); otherwise every loaded frame
-  processBurst(inspector ? inspector.includedFrames().map((f) => f.idx) : null);
+  // still checked (same as the inspector's Merge button, including alignment reuse and the
+  // return to the inspector's "Merged" view); otherwise every loaded frame
+  processBurst(inspector ? inspector.includedFrames().map((f) => f.idx) : null,
+    { reuse: inspectionReuse ? inspectionReuse() : null, returnToInspector: !!inspector });
 });
 
 // "Process burst" is only clickable when a processed result is out of date:

@@ -20,7 +20,7 @@ import { packUniforms } from './gpu.js';
 import {
   alignmentStats, renderAlignmentField, alignmentVariationInRoi, normalizeRoi,
   brightnessMatchValues, robustBrightnessMatchValues, medianOfSorted,
-  downsampleValues, grayBitmapFromValues, rgbaFromPackedU32,
+  downsampleValues, grayBitmapFromValues, rgbaFromPackedU32, downsampleU16,
 } from './viz.js';
 
 const WORKGROUP = 8;
@@ -427,6 +427,34 @@ export class InspectionSession {
   async renderFrame(idx, params) {
     const f = this.frame(idx);
     switch (params.mode) {
+      case 'merged': {
+        // the merged result (set by the UI after an inspector merge), rendered like the
+        // other photo views: box-average to the display size, tonemap to the brightest
+        // block. Mode is burst-level, so `idx` is ignored. Cached per output size.
+        const m = this.mergedResult;
+        if (!m) {
+          return { bitmap: grayBitmapFromValues(new Float32Array(1), 1, 1, 1), info: 'no merged result yet' };
+        }
+        const outW = params.outWidth, outH = params.outHeight;
+        let bitmap = this._mergedCache && this._mergedCache.w === outW && this._mergedCache.h === outH
+          ? this._mergedCache.bitmap : null;
+        if (!bitmap) {
+          const values = downsampleU16(m.pixels, m.width, m.height, outW, outH);
+          const black = m.blackLevel.reduce((a, b) => a + b, 0) / m.blackLevel.length;
+          let max = 0;
+          for (let i = 0; i < values.length; i++) {
+            values[i] -= black;
+            if (values[i] > max) max = values[i];
+          }
+          bitmap = grayBitmapFromValues(values, outW, outH, Math.max(max, 1e-6));
+          this._mergedCache = { w: outW, h: outH, bitmap };
+        }
+        return {
+          bitmap,
+          info: `merged result of ${m.count} frames · gray, white = brightest block · DNG on the preview pane`,
+        };
+      }
+
       case 'alignment': {
         // per-tile shift field as optical-flow colors: hue = shift direction,
         // brightness = shift magnitude (the reference frame's zero field is uniform black)

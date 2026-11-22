@@ -335,24 +335,48 @@ try {
     && Number.isInteger(afApplied.anchor.tileX) && Number.isInteger(afApplied.anchor.tileY),
     `anchor=${JSON.stringify(afApplied.anchor)} manual=${afApplied.anchorManual}`);
 
-  // merge the remaining 3 frames → preview + download
+  // merge the remaining 3 frames → back into the inspector with a "Merged" view
   await page.click('#inspMerge');
   // the inspection session's alignment grids must actually be reused: the per-frame
   // merge stages must report 'warp+merge' (the intent log line alone once passed an
   // e2e run while a wiring bug still re-ran the full pyramid search per frame)
   await page.waitForFunction(() => document.getElementById('log').textContent.includes('warp+merge 1/'), { timeout: 120000 });
-  await page.waitForSelector('#previewPane:not([hidden])', { timeout: 120000 });
+  // the inspection view must come back with the merged result as an extra mode
+  await page.waitForFunction(() => {
+    const b = document.getElementById('inspMergedMode');
+    return b && !b.hidden && !document.getElementById('inspectorPane').hidden;
+  }, { timeout: 30000 });
   const reuseLogged = await page.evaluate(() => {
     const text = document.getElementById('log').textContent;
     return {
       intent: text.includes('reusing the inspection alignment'),
       warpStages: (text.match(/warp\+merge \d+\//g) || []).length,
       alignStages: (text.match(/align\+merge \d+\//g) || []).length,
+      mergedActive: document.querySelector('#inspModes button[data-mode="merged"]')?.classList.contains('active'),
+      openPreviewShown: !document.getElementById('inspOpenPreview').hidden,
     };
   });
   check('merge reuses the inspection alignment (warp stages, no align stages)',
     reuseLogged.intent && reuseLogged.warpStages >= 1 && reuseLogged.alignStages === 0,
     JSON.stringify(reuseLogged));
+  check('after the merge, the inspector shows the Merged view + preview button',
+    reuseLogged.mergedActive && reuseLogged.openPreviewShown, JSON.stringify(reuseLogged));
+
+  // the merged render must show real content (tonemapped, not black)
+  await new Promise((r) => setTimeout(r, 1000)); // let the render pump finish
+  const mergedLit = await page.evaluate(() => {
+    const c = document.getElementById('inspCanvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let lit = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 24) lit++;
+    return { ratio: lit / (d.length / 4), info: document.getElementById('inspInfoLine').textContent };
+  });
+  check('Merged view renders non-black output', mergedLit.ratio > 0.1,
+    `lit=${(mergedLit.ratio * 100).toFixed(0)}% — ${mergedLit.info.slice(0, 80)}`);
+
+  // the merge bar's "Preview & download" opens the preview pane with the merged DNG
+  await page.click('#inspOpenPreview');
+  await page.waitForSelector('#previewPane:not([hidden])', { timeout: 30000 });
   const merged = await page.evaluate(() => ({
     canvasW: document.getElementById('canvas').width,
     href: document.getElementById('download').href.startsWith('blob:'),

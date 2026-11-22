@@ -31,7 +31,7 @@ import { renderAlignmentField, grayBitmapFromValues, roiIsDegenerate, normalizeR
 
 const MODES = ['alignment', 'difference', 'original', 'warped', 'reference'];
 const MODE_IS_ALIGNMENT = (m) => m === 'alignment';
-const MODE_KEEP_THUMBS = (m) => m === 'original' || m === 'reference'; // thumbnails keep previous mode
+const MODE_KEEP_THUMBS = (m) => m === 'original' || m === 'reference' || m === 'merged'; // thumbnails keep previous mode
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
@@ -39,11 +39,15 @@ export class InspectorUI {
   /**
    * @param {InspectionSession} session from performInspection()
    * @param {{ onMerge: (includedFrames: Array) => void,
+   *           onOpenPreview?: () => void,
    *           initialRoi?: {x0:number,y0:number,x1:number,y1:number}|null }} opts
    *   initialRoi: subject area detected from the reference frame's AF metadata; when
    *   omitted (or arriving late via applyAfAreaRoi), the centered half is used.
+   *   onOpenPreview: invoked by the merge bar's "Preview & download" button (shown once
+   *   a merged result exists).
    */
-  constructor(session, { onMerge, initialRoi = null }) {
+  constructor(session, { onMerge, onOpenPreview = null, initialRoi = null }) {
+    this.onOpenPreview = onOpenPreview;
     this.session = session;
     this.onMerge = onMerge;
 
@@ -75,7 +79,14 @@ export class InspectorUI {
       infoLine: $('inspInfoLine'),
       mergeText: $('inspMergeText'),
       mergeBtn: $('inspMerge'),
+      mergedMode: $('inspMergedMode'),
+      openPreview: $('inspOpenPreview'),
     };
+    // fresh view: no merged result yet (the buttons are revealed by setMerged; the DOM
+    // elements persist across inspections, so re-hide them here)
+    this.mergedResult = null;
+    this.el.mergedMode.hidden = true;
+    this.el.openPreview.hidden = true;
 
     // ---- UI state (port of InspectorContentView's @State vars) ----
     this.state = {
@@ -262,8 +273,8 @@ export class InspectorUI {
     this.el.mergeBtn.textContent = `Merge ${included} of ${total} images`;
     this.el.mergeBtn.disabled = included < 2;
     this.el.mergeText.textContent = included === total
-      ? 'Merging runs the full alignment + merge pipeline on the checked images.'
-      : 'Unchecked images are excluded from the merge (it picks its own reference from the included images).';
+      ? 'Merging runs the pipeline on the checked images and reuses the inspection alignment; the result appears as the "Merged" view.'
+      : 'Unchecked images are excluded from the merge; the inspection reference stays the reference and its alignment is reused.';
   }
 
   // ------------------------------------------------------------------ events
@@ -399,6 +410,8 @@ export class InspectorUI {
       if (included.length < 2) return;
       this.onMerge(included.map((f) => f.idx));
     });
+    el.mergedMode.addEventListener('click', () => this.setMode('merged'));
+    el.openPreview.addEventListener('click', () => this.onOpenPreview?.());
 
     // keyboard navigation (only while the inspector is visible and no text input has focus)
     this.keyHandler = (e) => {
@@ -431,15 +444,31 @@ export class InspectorUI {
   // ------------------------------------------------------------- state mutations
 
   setMode(mode) {
-    if (!MODES.includes(mode) || mode === this.state.mode) return;
+    const known = this.mergedResult ? [...MODES, 'merged'] : MODES;
+    if (!known.includes(mode) || mode === this.state.mode) return;
     this.state.mode = mode;
     this.refreshToolbar();
     this.scheduleRender();
   }
 
   moveMode(delta) {
-    const next = clamp(MODES.indexOf(this.state.mode) + delta, 0, MODES.length - 1);
-    this.setMode(MODES[next]);
+    const known = this.mergedResult ? [...MODES, 'merged'] : MODES;
+    const next = clamp(known.indexOf(this.state.mode) + delta, 0, known.length - 1);
+    this.setMode(known[next]);
+  }
+
+  /**
+   * Hand a finished merge to the inspection view: the burst-level result becomes an
+   * extra "Merged" mode (like the Reference view), the mode is selected, and the merge
+   * bar gains a "Preview & download" button. Re-merging replaces the result.
+   */
+  setMerged(merged) {
+    this.session.mergedResult = merged;
+    this.session._mergedCache = null; // invalidate the rendered overview
+    this.mergedResult = merged;
+    this.el.mergedMode.hidden = false;
+    this.el.openPreview.hidden = false;
+    this.setMode('merged');
   }
 
   /**

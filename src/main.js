@@ -111,9 +111,25 @@ processBtn.addEventListener('click', async () => {
     log(`align+merge: ${result.timings.alignMergeMs.toFixed(0)} ms ` +
         `(prepare ${result.timings.prepareMs.toFixed(0)} ms, finalize ${result.timings.finalizeMs.toFixed(0)} ms) — noise_sd=${result.noiseSd.toFixed(2)}`);
 
-    // ---- DNG output ----
+    // ---- DNG output (metadata follows Google's HDR+ convention) ----
     setProgress(0.95, 'writing DNG');
     const refMeta = frames[0];
+    const n = frames.length;
+    const exposureTimes = frames.map((f) => f.exif?.exposureTime).filter((t) => Number.isFinite(t) && t > 0);
+    const totalExposure = exposureTimes.length === n
+      ? exposureTimes.reduce((a, b) => a + b, 0)
+      : null;
+    const refIso = refMeta.exif?.iso;
+    const exif = {
+      // total integration time across the burst (matches Night Sight/HDR+ output)
+      exposureTime: totalExposure,
+      // effective ISO: reference ISO / number of shots
+      iso: Number.isFinite(refIso) && refIso > 0 ? refIso / n : null,
+      fNumber: refMeta.exif?.fNumber ?? null,
+      focalLength: refMeta.exif?.focalLength ?? null,
+      captureTime: refMeta.exif?.captureTime ?? null,
+    };
+    if (totalExposure) log(`metadata: exposure ${totalExposure.toFixed(3)} s (Σ ${n} frames), ISO ≈ ${Math.round(exif.iso)} (ref ${refIso} / ${n})`);
     const dngBytes = writeDNG(result.pixels, {
       width: result.width,
       height: result.height,
@@ -125,6 +141,7 @@ processBtn.addEventListener('click', async () => {
       orientation: refMeta.orientation,
       make: refMeta.make,
       model: refMeta.model,
+      exif,
     });
     const blob = new Blob([dngBytes], { type: 'image/x-adobe-dng' });
     downloadLink.href = URL.createObjectURL(blob);

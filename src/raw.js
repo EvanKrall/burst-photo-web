@@ -96,6 +96,14 @@ export async function decodeDNG(arrayBuffer, name = 'frame') {
       orientation: meta.orientation ?? 1,
       make: meta.camera?.make ?? null,
       model: meta.camera?.model ?? null,
+      // EXIF-relevant capture parameters of this frame (null when unknown)
+      exif: {
+        iso: meta.exposure?.iso ?? null,
+        exposureTime: meta.exposure?.exposureTime ?? null,   // seconds
+        fNumber: meta.exposure?.fNumber ?? null,
+        focalLength: meta.exposure?.focalLength ?? null,     // mm
+        captureTime: meta.captureTime ?? null,               // ISO-8601-ish string
+      },
     };
   } finally {
     raw.close();

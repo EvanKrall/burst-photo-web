@@ -33,6 +33,15 @@ const dng = writeDNG(pixels, {
   orientation: 1,
   make: 'TestCam',
   model: 'PoC-1',
+  whiteBalance: [2.1, 1, 1.9, 1],
+  // burst-adjusted capture parameters (what main.js computes: Σ exposure, ISO/n)
+  exif: {
+    exposureTime: 0.032, // e.g. 8 × 1/250 s
+    iso: 25,             // e.g. 200 / 8
+    fNumber: 4,
+    focalLength: 50,
+    captureTime: '2024-06-01T12:00:00Z',
+  },
 });
 
 let failures = 0;
@@ -57,6 +66,37 @@ check('bits per sample (258=16)', tags.get(258)?.value === 16);
 check('orientation (274=1)', tags.get(274)?.value === 1);
 check('CFAPattern (33422)', tags.get(33422)?.count === 4);
 check('DNGVersion (50706)', tags.get(50706)?.count === 4);
+check('Make/Model tags present', tags.has(271) && tags.has(272));
+check('Software tag (305)', tags.has(305));
+check('DateTime tag (306)', tags.has(306));
+
+// ---- EXIF sub-IFD: parse it back and verify burst-adjusted values ----
+check('ExifIFDPointer present (34665)', tags.has(34665));
+const exifOff = tags.get(34665).value;
+const nExif = dv.getUint16(exifOff, true);
+check('EXIF IFD entry count', nExif >= 5, `${nExif} entries`);
+const exifTags = new Map();
+for (let i = 0; i < nExif; i++) {
+  const e = exifOff + 2 + i * 12;
+  exifTags.set(dv.getUint16(e, true), { type: dv.getUint16(e + 2, true), count: dv.getUint32(e + 4, true), value: dv.getUint32(e + 8, true) });
+}
+const readRational = (tag) => {
+  const t = exifTags.get(tag);
+  if (!t || t.type !== 5) return null;
+  return dv.getUint32(t.value, true) / dv.getUint32(t.value + 4, true);
+};
+const exp = readRational(33434);
+check('ExposureTime = total integration (0.032 s)', exp !== null && Math.abs(exp - 0.032) < 1e-9, `${exp} s`);
+const fn = readRational(33437);
+check('FNumber = 4.0', fn !== null && Math.abs(fn - 4) < 1e-9, `f/${fn}`);
+const iso = exifTags.get(34855);
+const isoVal = iso ? iso.value & 0xffff : null; // inline SHORT lives in the low half of the value field
+check('ISOSpeedRatings = 25 (200/8)', isoVal === 25, String(isoVal));
+const focal = readRational(37386);
+check('FocalLength = 50 mm', focal !== null && Math.abs(focal - 50) < 1e-9, `${focal} mm`);
+const dto = exifTags.get(36867);
+const dtoStr = dto ? String.fromCharCode(...dng.subarray(dto.value, dto.value + dto.count)).replace(/\0$/, '') : null;
+check('DateTimeOriginal = 2024:06:01 12:00:00', dtoStr === '2024:06:01 12:00:00', dtoStr);
 
 // ---- flashraw round trip ----
 const raw = await FlashRaw.open(dng);
@@ -64,6 +104,13 @@ const meta = raw.metadata;
 check('layout is bayer', meta.layout === 'bayer', meta.layout);
 check('dimensions', meta.width === W && meta.height === H, `${meta.width}x${meta.height} (raw ${meta.rawWidth}x${meta.rawHeight})`);
 check('camera model', meta.camera?.make === 'TestCam' && meta.camera?.model === 'PoC-1');
+
+// flashraw should surface the burst-adjusted exposure metadata it reads from our EXIF IFD
+const ex = meta.exposure;
+check('flashraw reads ExposureTime (total)', ex && Math.abs(ex.exposureTime - 0.032) < 1e-6,
+  ex ? `${ex.exposureTime} s` : 'missing');
+check('flashraw reads ISO (effective)', ex && ex.iso === 25, ex ? String(ex.iso) : 'missing');
+check('flashraw reads FNumber', ex && Math.abs(ex.fNumber - 4) < 1e-6, ex ? `f/${ex.fNumber}` : 'missing');
 
 const frame = await raw.decode({ backend: 'cpu', output: 'raw-u16', crop: 'active' });
 check('frame dimensions', frame.width === W && frame.height === H, `${frame.width}x${frame.height}`);

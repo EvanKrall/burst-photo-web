@@ -136,6 +136,8 @@ export class InspectionSession {
     this.zeroGrid = null;
     this._rgbCache = new Map();   // developed RGB photo views, key (view, frame, shift, size)
     this._rgbCacheSize = null;    // display size the cache was built for
+    this._developCache = new Map(); // key -> PROMISE of the full-res developed RGBA (LRU ≤ 3,
+                                    // ~100 MB per entry at 24 MP) — shared by every render size
   }
 
   addFrame(entry) {
@@ -428,6 +430,29 @@ export class InspectionSession {
    * of the per-mode info strings).
    */
   /**
+   * Cached full-res developed image (promise of {rgba, width, height}) for a view key.
+   * LRU-bounded: full-res RGBA is ~100 MB per entry at 24 MP, so only the last three
+   * views are kept; failed develops are dropped so the next render can retry.
+   */
+  developSourceCached(key, makeFrame) {
+    const hit = this._developCache.get(key);
+    if (hit) {
+      this._developCache.delete(key);
+      this._developCache.set(key, hit); // LRU touch
+      return hit;
+    }
+    const promise = Promise.resolve(makeFrame()).then((frame) => developBayer(frame));
+    promise.catch(() => this._developCache.delete(key)); // drop failures, keep rejection for the caller
+    this._developCache.set(key, promise);
+    while (this._developCache.size > 3) {
+      const oldest = this._developCache.keys().next().value;
+      if (oldest === key) break;
+      this._developCache.delete(oldest);
+    }
+    return promise;
+  }
+
+  /**
    * Developed-RGB photo view (Original / Warped / Reference tabs): the frame's Bayer data
    * — or the warped plane, converted back to u16 Bayer — is developed with the whole
    * flashraw chain (src/raw.js developBayer: demosaic, as-shot WB, color matrix, sRGB)
@@ -450,16 +475,12 @@ export class InspectionSession {
     const hit = this._rgbCache.get(key);
     if (hit) return hit;
     try {
-      let frame;
-      if (mode === 'warped') {
-        frame = await this.warpedBayerU16(idx);
-      } else if (dx || dy) {
-        frame = await this.shiftedBayerU16(idx, dx, dy);
-      } else {
+      const dev = await this.developSourceCached(key, async () => {
+        if (mode === 'warped') return this.warpedBayerU16(idx);
+        if (dx || dy) return this.shiftedBayerU16(idx, dx, dy);
         // Reference (and unshifted Original of the reference frame — same content)
-        frame = this.framesIn[mode === 'reference' ? this.refIdx : idx];
-      }
-      const dev = await developBayer(frame);
+        return this.framesIn[mode === 'reference' ? this.refIdx : idx];
+      });
       const entry = { bitmap: downsampleRGBA(dev.rgba, dev.width, dev.height, outW, outH), dx, dy };
       this._rgbCache.set(key, entry);
       return entry;
@@ -527,10 +548,10 @@ export class InspectionSession {
         const outW = params.outWidth, outH = params.outHeight;
         let bitmap = this._mergedCache && this._mergedCache.w === outW && this._mergedCache.h === outH
           ? this._mergedCache.bitmap : null;
-        let developed = false;
         if (!bitmap) {
+          let developed = false;
           try {
-            const dev = await developBayer({ ...m, data: m.pixels });
+            const dev = await this.developSourceCached('merged', () => ({ ...m, data: m.pixels }));
             bitmap = downsampleRGBA(dev.rgba, dev.width, dev.height, outW, outH);
             developed = true;
           } catch (err) {
@@ -546,11 +567,11 @@ export class InspectionSession {
             }
             bitmap = grayBitmapFromValues(values, outW, outH, Math.max(max, 1e-6));
           }
-          this._mergedCache = { w: outW, h: outH, bitmap };
+          this._mergedCache = { w: outW, h: outH, bitmap, developed };
         }
         return {
           bitmap,
-          info: developed
+          info: this._mergedCache.developed
             ? `merged result of ${m.count} frames · developed RGB (demosaic, WB, color matrix, sRGB) · "Download DNG" below`
             : `merged result of ${m.count} frames · gray tonemap (flashraw develop failed) · "Download DNG" below`,
         };

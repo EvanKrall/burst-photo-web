@@ -653,6 +653,9 @@ export class InspectorUI {
     this.el.zoomBadge.hidden = false;
     this.el.zoomBadge.textContent = `×${zoom.toFixed(1)}  (double-click to reset)`;
     this.drawOverlay();
+    // re-render at the new device-pixel backing size (the developed source is cached, so
+    // this is just a fresh box-average — the pump coalesces wheel ticks)
+    this.scheduleRender();
   }
 
   applyCanvasSize() {
@@ -743,10 +746,14 @@ export class InspectorUI {
     // pooled GPU render size for the photo modes: roughly pane-sized, aspect-preserved
     const wrap = this.el.imageWrap;
     const aspect = this.session.width / this.session.height;
-    let w = Math.min(wrap.clientWidth - 24, 1440);
+    // device pixels: the canvas backing store must match the on-screen pixel grid, or
+    // retina-class displays upscale the bitmap 2× and photo views look soft
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let w = Math.min(wrap.clientWidth - 24, 1440) * dpr;
     let h = Math.round(w / aspect);
-    if (h > wrap.clientHeight - 24) {
-      h = Math.max(wrap.clientHeight - 24, 100);
+    const maxH = Math.max(Math.round((wrap.clientHeight - 24) * dpr), 100);
+    if (h > maxH) {
+      h = maxH;
       w = Math.round(h * aspect);
     }
     return { outWidth: clamp(Math.round(w / 4) * 4, 64, 4096), outHeight: clamp(Math.round(h / 4) * 4, 64, 4096) };

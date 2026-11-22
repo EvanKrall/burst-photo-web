@@ -118,7 +118,7 @@ flag is honored end-to-end so WB is never applied twice.
 
 The merged result is **fully developed by flashraw from our own merged DNG** —
 the same bytes you download — so the Merged view shows exactly what a RAW
-converter will see: demosaic (half-size for speed), as-shot white balance,
+converter will see: full-resolution bilinear demosaic, as-shot white balance,
 camera color matrix, sRGB encoding and orientation. The same development
 chain renders the Original/Warped/Reference photo views from each frame's
 Bayer data. (Earlier iterations used a hand-rolled 2×2-block render or gray

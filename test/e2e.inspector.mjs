@@ -337,10 +337,22 @@ try {
 
   // merge the remaining 3 frames → preview + download
   await page.click('#inspMerge');
+  // the inspection session's alignment grids must actually be reused: the per-frame
+  // merge stages must report 'warp+merge' (the intent log line alone once passed an
+  // e2e run while a wiring bug still re-ran the full pyramid search per frame)
+  await page.waitForFunction(() => document.getElementById('log').textContent.includes('warp+merge 1/'), { timeout: 120000 });
   await page.waitForSelector('#previewPane:not([hidden])', { timeout: 120000 });
-  // the inspection session's alignment grids must be reused (same reference + same params)
-  const reuseLogged = await page.evaluate(() => document.getElementById('log').textContent.includes('reusing the inspection alignment'));
-  check('merge reuses the inspection alignment', reuseLogged);
+  const reuseLogged = await page.evaluate(() => {
+    const text = document.getElementById('log').textContent;
+    return {
+      intent: text.includes('reusing the inspection alignment'),
+      warpStages: (text.match(/warp\+merge \d+\//g) || []).length,
+      alignStages: (text.match(/align\+merge \d+\//g) || []).length,
+    };
+  });
+  check('merge reuses the inspection alignment (warp stages, no align stages)',
+    reuseLogged.intent && reuseLogged.warpStages >= 1 && reuseLogged.alignStages === 0,
+    JSON.stringify(reuseLogged));
   const merged = await page.evaluate(() => ({
     canvasW: document.getElementById('canvas').width,
     href: document.getElementById('download').href.startsWith('blob:'),

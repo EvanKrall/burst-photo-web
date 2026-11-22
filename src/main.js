@@ -354,13 +354,16 @@ async function processBurst(frameIndices = null, reuse = null) {
         log('Not reusing the inspection alignment: its reference frame is excluded from the merge — aligning from scratch.');
       } else {
         prealigned = ordered.map((ci) => reuse.grids.get(ci) ?? null);
-        if (prealigned.slice(1).some((g) => !g)) prealigned = null;
+        if (prealigned.slice(1).some((g) => !g)) {
+          prealigned = null;
+          log('Not reusing the inspection alignment: missing alignment grids — aligning from scratch.');
+        }
       }
     }
     log(`${prealigned ? 'Merging' : 'Aligning & merging'} ${frames.length} frames (spatial domain, tile=${options.tileSize}, search=${options.searchDistance}, noise=${options.noiseReduction})${prealigned ? ' — reusing the inspection alignment' : ''}…`);
     if (prealigned) log(`reference: frame ${String(refIdxCapture).padStart(2, '0')} (inspection reference) — the per-frame pyramid search is skipped.`);
 
-    const result = await alignMergeSpatial(gpu, frames, options, (p) => {
+    const result = await alignMergeSpatial(gpu, frames, { ...options, prealigned }, (p) => {
       const inner = p.total > 1 ? p.frame / p.total : 1;
       setProgress(stageProgress('alignMerge', inner), `${p.stage} ${p.frame}/${p.total}`);
       const t = p.timings;

@@ -118,6 +118,9 @@ export class InspectorUI {
     this.pendingMoves = 0;
     this.lastQueuedKey = null;
     this.lastThumbKey = null;
+    this._renderedMode = null;   // mode of the last completed render
+    this._renderedCrop = null;   // normalized crop of the last render (null = full frame)
+    this._lastFullDims = null;   // bitmap dims of the last full (non-crop) render
 
     this.rows = new Map(); // idx -> row element
     this.thumbs = new Map(); // idx -> ImageBitmap-ish {rgba, width, height}
@@ -425,6 +428,12 @@ export class InspectorUI {
       this.setZoom(clamp(this.state.zoom * factor, 1, 16), e);
     }, { passive: false });
 
+    // when zoomed, the canvas covers only the visible crop — pan must re-render around
+    // the new area (cheap: pane-sized box-average of the cached full-res develop)
+    el.imageWrap.addEventListener('scroll', () => {
+      if (this._renderedCrop) this.scheduleRender();
+    }, { passive: true });
+
     // merge
     el.mergeBtn.addEventListener('click', () => {
       const included = this.includedFrames();
@@ -640,11 +649,9 @@ export class InspectorUI {
 
   /** Display rect of the fitted image inside the scroll container (CSS px). */
   fittedRect() {
-    const bmp = this.currentBitmap;
-    if (!bmp) return { x: 0, y: 0, w: 0, h: 0 };
-    const w = bmp.width * this.displayScale();
-    const h = bmp.height * this.displayScale();
-    return { x: 0, y: 0, w, h };
+    if (!this.currentBitmap) return { x: 0, y: 0, w: 0, h: 0 };
+    const full = this.fullCssSize();
+    return { x: 0, y: 0, w: full.w, h: full.h };
   }
 
   /** CSS px per bitmap px: the canvas element is sized bitmap*fit*zoom, so this is fit*zoom. */
@@ -689,9 +696,9 @@ export class InspectorUI {
     this.el.zoomBadge.hidden = false;
     this.el.zoomBadge.textContent = `×${zoom.toFixed(1)}  (double-click to reset)`;
     this.drawOverlay();
-    // no re-render here: zoom beyond the fit-size backing is a CSS rescale of the same
-    // bitmap (the source's detail ceiling is reached around ×2 on a 24 MP frame anyway;
-    // a zoom-aware render target would double the per-size cache footprint)
+    // re-render at the new zoom: past fit, photo views re-render the visible crop at
+    // pane device resolution (1:1 detail); back at fit they render the full frame
+    this.scheduleRender();
   }
 
   applyCanvasSize() {
@@ -704,12 +711,28 @@ export class InspectorUI {
       return;
     }
     holder.style.position = 'relative';
-    const w = Math.round(bmp.width * this.displayScale());
-    const h = Math.round(bmp.height * this.displayScale());
+    // the holder spans the WHOLE image extent (the overlay maps onto it); when zoomed,
+    // the canvas is a crop bitmap positioned absolutely over the visible region
+    const full = this.fullCssSize();
+    const w = Math.round(full.w);
+    const h = Math.round(full.h);
     holder.style.width = `${w}px`;
     holder.style.height = `${h}px`;
-    this.el.canvas.style.width = `${w}px`;
-    this.el.canvas.style.height = `${h}px`;
+    const canvas = this.el.canvas;
+    const crop = this._renderedCrop;
+    if (crop) {
+      canvas.style.position = 'absolute';
+      canvas.style.left = `${Math.round(crop.x * w)}px`;
+      canvas.style.top = `${Math.round(crop.y * h)}px`;
+      canvas.style.width = `${Math.round(crop.w * w)}px`;
+      canvas.style.height = `${Math.round(crop.h * h)}px`;
+    } else {
+      canvas.style.position = 'static';
+      canvas.style.left = 'auto';
+      canvas.style.top = 'auto';
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+    }
     this.el.overlay.style.width = `${w}px`;
     this.el.overlay.style.height = `${h}px`;
     this.el.overlay.width = w;
@@ -791,9 +814,44 @@ export class InspectorUI {
     return { outWidth: clamp(Math.round(w / 4) * 4, 64, 4096), outHeight: clamp(Math.round(h / 4) * 4, 64, 4096) };
   }
 
+  /**
+   * CSS extent of the WHOLE image at the current zoom — the coordinate frame shared by
+   * the holder, the overlay and the scroll. Independent of the rendered bitmap, which
+   * covers only the visible crop when zoomed in. Based on the last FULL render's bitmap
+   * dims (alignment's tile grid and the photo views have very different dims), falling
+   * back to the render target before the first render.
+   */
+  fullCssSize() {
+    const s = this.displayScale();
+    const d = this._lastFullDims;
+    if (d) return { w: d.w * s, h: d.h * s };
+    const t = this.renderTargetSize();
+    return { w: t.outWidth * s, h: t.outHeight * s };
+  }
+
   currentRenderParams() {
     const s = this.state;
     const target = this.renderTargetSize();
+    // photo/merged views zoomed past fit: render only the visible region, at pane device
+    // resolution — the bitmap then maps 1:1 onto the screen at any zoom depth
+    let crop = null;
+    let outWidth = target.outWidth, outHeight = target.outHeight;
+    if (s.mode !== 'alignment' && s.mode !== 'difference' && s.zoom > 1) {
+      const full = this.fullCssSize();
+      const wrap = this.el.imageWrap;
+      const x0 = clamp(wrap.scrollLeft / full.w, 0, 1);
+      const y0 = clamp(wrap.scrollTop / full.h, 0, 1);
+      const x1 = clamp((wrap.scrollLeft + wrap.clientWidth) / full.w, 0, 1);
+      const y1 = clamp((wrap.scrollTop + wrap.clientHeight) / full.h, 0, 1);
+      if (x1 - x0 > 0.01 && y1 - y0 > 0.01) {
+        crop = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const cw = wrap.clientWidth > 0 ? wrap.clientWidth : 1440;
+        const ch = wrap.clientHeight > 0 ? wrap.clientHeight : 900;
+        outWidth = clamp(Math.round(cw * dpr / 4) * 4, 64, 4096);
+        outHeight = clamp(Math.round(ch * dpr / 4) * 4, 64, 4096);
+      }
+    }
     return {
       mode: s.mode,
       alignmentScale: s.alignShared ? this.session.alignmentScale : Math.max(Math.round(s.alignManualScale), 1),
@@ -802,7 +860,9 @@ export class InspectorUI {
         ? s.diffGain * this.session.medianDiffMean : null,
       diffGain: s.diffGain,
       matchExposure: s.matchExposure,
-      ...target,
+      outWidth,
+      outHeight,
+      crop,
     };
   }
 
@@ -839,25 +899,23 @@ export class InspectorUI {
       if (MODE_IS_ALIGNMENT(req.params.mode) && req.params.anchor) {
         [offsetX, offsetY] = this.session.texelOffset(req.idx, req.params.anchor.tileX, req.params.anchor.tileY);
       }
-      const { bitmap, info } = await this.session.renderFrame(req.idx, { ...req.params, offsetX, offsetY });
+      const { bitmap, info, crop } = await this.session.renderFrame(req.idx, { ...req.params, offsetX, offsetY });
       const prevBmp = this.currentBitmap;
       // on a mode switch, capture where the viewport center sits in the current image
-      // (normalized 0..1) so the same content point can be restored in the new view —
-      // zooming into a subject and flipping Original/Warped/Reference/Merged with ←/→
-      // then keeps that subject under the same screen point. Normalized fractions are
-      // comparable across modes because every view maps the (same) image extent.
+      // (normalized 0..1 of the WHOLE image extent) so the same content point can be
+      // restored in the new view — zooming into a subject and flipping Original/Warped/
+      // Reference/Merged with ←/→ then keeps that subject under the same screen point.
       const modeChanged = this._renderedMode !== req.params.mode;
       this._renderedMode = req.params.mode;
       let centerFrac = null;
       if (modeChanged && prevBmp) {
         const wrap = this.el.imageWrap, holder = this.el.holder;
-        const cssW = this.el.canvas.clientWidth, cssH = this.el.canvas.clientHeight;
-        if (cssW > 0 && cssH > 0) {
-          const cx = wrap.scrollLeft + wrap.clientWidth / 2 - holder.offsetLeft;
-          const cy = wrap.scrollTop + wrap.clientHeight / 2 - holder.offsetTop;
-          centerFrac = { x: clamp(cx / cssW, 0, 1), y: clamp(cy / cssH, 0, 1) };
-        }
+        const full = this.fullCssSize();
+        const cx = wrap.scrollLeft + wrap.clientWidth / 2 - holder.offsetLeft;
+        const cy = wrap.scrollTop + wrap.clientHeight / 2 - holder.offsetTop;
+        centerFrac = { x: clamp(cx / full.w, 0, 1), y: clamp(cy / full.h, 0, 1) };
       }
+      this._renderedCrop = crop || null;
       this.currentBitmap = bitmap;
       this.state.renderedInfo = info;
       const ctx = this.el.canvas.getContext('2d');
@@ -865,15 +923,18 @@ export class InspectorUI {
       this.el.canvas.height = bitmap.height;
       ctx.putImageData(new ImageData(bitmap.rgba, bitmap.width, bitmap.height), 0, 0);
       this.el.holder.classList.toggle('pixelated', MODE_IS_ALIGNMENT(req.params.mode));
-      // baseScale belongs to the bitmap, not the zoom level: recompute when the bitmap
-      // dims change (mode switches — alignment's tile-grid bitmap is tiny compared to
-      // the photo views) or the pane box changed since the last fit. Zoom then applies
-      // uniformly on top, so the alignment view fills the pane at any zoom instead of
-      // reusing the photo views' sub-1 fit scale and shrinking to a thumbnail.
-      const dimsChanged = !prevBmp || prevBmp.width !== bitmap.width || prevBmp.height !== bitmap.height;
-      const wrapKey = `${this.el.imageWrap.clientWidth}x${this.el.imageWrap.clientHeight}`;
-      if (dimsChanged || wrapKey !== this._baseScaleWrap) {
-        this.baseScale = this.baseScaleFor(bitmap);
+      // baseScale belongs to the full-image bitmap, not the zoom level: recompute when
+      // the FULL-render dims change (mode switches — alignment's tile-grid bitmap is tiny
+      // compared to the photo views) or the pane box changed since the last fit. Crop
+      // renders (zoomed views) leave the scale state untouched — their dims are the pane,
+      // not the image.
+      if (!crop) {
+        const dimsChanged = !this._lastFullDims || this._lastFullDims.w !== bitmap.width || this._lastFullDims.h !== bitmap.height;
+        const wrapKey = `${this.el.imageWrap.clientWidth}x${this.el.imageWrap.clientHeight}`;
+        if (dimsChanged || wrapKey !== this._baseScaleWrap) {
+          this.baseScale = this.baseScaleFor(bitmap);
+        }
+        this._lastFullDims = { w: bitmap.width, h: bitmap.height };
         this._baseScaleWrap = wrapKey;
       }
       this.applyCanvasSize();
@@ -884,8 +945,12 @@ export class InspectorUI {
       if (modeChanged) {
         const wrap = this.el.imageWrap, holder = this.el.holder;
         const f = centerFrac || { x: 0.5, y: 0.5 };
-        wrap.scrollLeft = f.x * this.el.canvas.clientWidth + holder.offsetLeft - wrap.clientWidth / 2;
-        wrap.scrollTop = f.y * this.el.canvas.clientHeight + holder.offsetTop - wrap.clientHeight / 2;
+        const full = this.fullCssSize();
+        wrap.scrollLeft = f.x * full.w + holder.offsetLeft - wrap.clientWidth / 2;
+        wrap.scrollTop = f.y * full.h + holder.offsetTop - wrap.clientHeight / 2;
+        // a crop render was computed from the pre-switch scroll position — re-crop around
+        // the restored point (one cheap pane-sized render)
+        if (crop) this.scheduleRender();
       }
       this.drawOverlay();
       this.refreshStatsBar();

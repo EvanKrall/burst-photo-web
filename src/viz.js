@@ -84,19 +84,24 @@ export function renderAlignmentField(texels, width, height, { scale = 8, offsetX
  * counterpart of the GPU pooled reads behind the other photo views.
  */
 export function downsampleU16(pixels, width, height, outW, outH) {
+  return downsampleU16Window(pixels, width, height, 0, 0, width, height, outW, outH);
+}
+
+/** Box-average the sub-window [x0,y0,x1,y1) — see downsampleRGBAWindow. */
+export function downsampleU16Window(pixels, width, height, x0, y0, x1, y1, outW, outH) {
   const out = new Float32Array(outW * outH);
-  // exact fractional cell boundaries — see downsampleRGBA
+  const ww = Math.max(1, x1 - x0), wh = Math.max(1, y1 - y0);
   for (let oy = 0; oy < outH; oy++) {
-    const y0 = Math.floor((oy * height) / outH);
-    const y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * height) / outH));
+    const ly0 = Math.floor((oy * wh) / outH);
+    const ly1 = Math.max(ly0 + 1, Math.floor(((oy + 1) * wh) / outH));
     for (let ox = 0; ox < outW; ox++) {
-      const x0 = Math.floor((ox * width) / outW);
-      const x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * width) / outW));
+      const lx0 = Math.floor((ox * ww) / outW);
+      const lx1 = Math.max(lx0 + 1, Math.floor(((ox + 1) * ww) / outW));
       let sum = 0, n = 0;
-      for (let y = y0; y < y1; y++) {
-        let i = y * width + x0;
-        for (let x = x0; x < x1; x++, i++) sum += pixels[i];
-        n += x1 - x0;
+      for (let y = y0 + ly0; y < y0 + ly1; y++) {
+        let i = y * width + x0 + lx0;
+        for (let x = lx0; x < lx1; x++, i++) sum += pixels[i];
+        n += lx1 - lx0;
       }
       out[oy * outW + ox] = n ? sum / n : 0;
     }
@@ -110,21 +115,29 @@ export function downsampleU16(pixels, width, height, outW, outH) {
  * frames (src/raw.js developBayer) into the inspector's display-size views.
  */
 export function downsampleRGBA(rgba, width, height, outW, outH) {
+  return downsampleRGBAWindow(rgba, width, height, 0, 0, width, height, outW, outH);
+}
+
+/**
+ * Box-average the sub-window [x0,y0,x1,y1) of the source into an outW×outH bitmap.
+ * Used for zoomed photo views: only the visible crop is rendered, at pane resolution,
+ * so zoomed-in detail stays at 1:1 device pixels without caching pane-sized bitmaps
+ * for every frame. Same exact-partition pooling as downsampleRGBA, applied to the
+ * window; upsampling degenerates to nearest-neighbor.
+ */
+export function downsampleRGBAWindow(rgba, width, height, x0, y0, x1, y1, outW, outH) {
   const out = new Uint8ClampedArray(outW * outH * 4);
-  // exact fractional cell boundaries: the cells partition the whole source, so no
-  // right/bottom remainder is dropped (integer cell sizes used to crop the bitmap to
-  // floor(width/outW)*outW — visible as a top-left zoom when the scale ratio had a
-  // fractional part). Upsampling (out > in) degenerates to nearest-neighbor.
+  const ww = Math.max(1, x1 - x0), wh = Math.max(1, y1 - y0);
   for (let oy = 0; oy < outH; oy++) {
-    const y0 = Math.floor((oy * height) / outH);
-    const y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * height) / outH));
+    const ly0 = Math.floor((oy * wh) / outH);
+    const ly1 = Math.max(ly0 + 1, Math.floor(((oy + 1) * wh) / outH));
     for (let ox = 0; ox < outW; ox++) {
-      const x0 = Math.floor((ox * width) / outW);
-      const x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * width) / outW));
+      const lx0 = Math.floor((ox * ww) / outW);
+      const lx1 = Math.max(lx0 + 1, Math.floor(((ox + 1) * ww) / outW));
       let r = 0, g = 0, b = 0, n = 0;
-      for (let y = y0; y < y1; y++) {
-        let i = (y * width + x0) * 4;
-        for (let x = x0; x < x1; x++, i += 4) {
+      for (let y = y0 + ly0; y < y0 + ly1; y++) {
+        let i = (y * width + x0 + lx0) * 4;
+        for (let x = lx0; x < lx1; x++, i += 4) {
           r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; n++;
         }
       }

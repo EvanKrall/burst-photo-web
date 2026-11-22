@@ -20,7 +20,7 @@ import { packUniforms } from './gpu.js';
 import {
   alignmentStats, renderAlignmentField, alignmentVariationInRoi, normalizeRoi,
   brightnessMatchValues, robustBrightnessMatchValues, medianOfSorted,
-  downsampleValues, grayBitmapFromValues, rgbaFromPackedU32, downsampleU16, downsampleRGBA,
+  downsampleValues, grayBitmapFromValues, rgbaFromPackedU32, downsampleU16, downsampleRGBA, downsampleRGBAWindow,
 } from './viz.js';
 import { developBayer } from './raw.js';
 
@@ -460,27 +460,38 @@ export class InspectionSession {
    * returns null when the develop fails so the caller can fall back to the gray view.
    * Returns { bitmap, dx, dy } (the anchor shift applied, for the info line).
    */
-  async developedPhotoView(mode, idx, outW, outH, anchor) {
-    const size = `${outW}x${outH}`;
-    if (this._rgbCacheSize !== size) {
-      this._rgbCache.clear();
-      this._rgbCacheSize = size;
-    }
-    let dx = 0, dy = 0;
-    const f = this.frame(idx);
-    if (mode === 'original' && anchor && !f.isRef) {
-      [dx, dy] = this.texelOffset(idx, anchor.tileX, anchor.tileY);
-    }
-    const key = (mode === 'warped' ? `w:${idx}` : `p:${idx}`) + (dx || dy ? `:${dx},${dy}` : '');
-    const hit = this._rgbCache.get(key);
-    if (hit) return hit;
+  async developedPhotoView(mode, idx, outW, outH, anchor, crop = null) {
     try {
+      let dx = 0, dy = 0;
+      const f = this.frame(idx);
+      if (mode === 'original' && anchor && !f.isRef) {
+        [dx, dy] = this.texelOffset(idx, anchor.tileX, anchor.tileY);
+      }
+      const key = (mode === 'warped' ? `w:${idx}` : `p:${idx}`) + (dx || dy ? `:${dx},${dy}` : '');
+      // develop source (cached, full resolution); the expensive part stays identical for
+      // full-frame and crop renders
       const dev = await this.developSourceCached(key, async () => {
         if (mode === 'warped') return this.warpedBayerU16(idx);
         if (dx || dy) return this.shiftedBayerU16(idx, dx, dy);
         // Reference (and unshifted Original of the reference frame — same content)
         return this.framesIn[mode === 'reference' ? this.refIdx : idx];
       });
+      if (crop) {
+        // zoomed view: render only the visible region, at pane resolution — no per-size
+        // caching (crop bitmaps are cheap to re-box-average from the cached source, and
+        // caching them would multiply memory with every zoom/scroll position)
+        const wx0 = Math.round(crop.x * dev.width), wy0 = Math.round(crop.y * dev.height);
+        const wx1 = Math.max(wx0 + 1, Math.round((crop.x + crop.w) * dev.width));
+        const wy1 = Math.max(wy0 + 1, Math.round((crop.y + crop.h) * dev.height));
+        return { bitmap: downsampleRGBAWindow(dev.rgba, dev.width, dev.height, wx0, wy0, wx1, wy1, outW, outH), dx, dy };
+      }
+      const size = `${outW}x${outH}`;
+      if (this._rgbCacheSize !== size) {
+        this._rgbCache.clear();
+        this._rgbCacheSize = size;
+      }
+      const hit = this._rgbCache.get(key);
+      if (hit) return hit;
       const entry = { bitmap: downsampleRGBA(dev.rgba, dev.width, dev.height, outW, outH), dx, dy };
       this._rgbCache.set(key, entry);
       return entry;
@@ -546,32 +557,51 @@ export class InspectionSession {
           return { bitmap: grayBitmapFromValues(new Float32Array(1), 1, 1, 1), info: 'no merged result yet' };
         }
         const outW = params.outWidth, outH = params.outHeight;
-        let bitmap = this._mergedCache && this._mergedCache.w === outW && this._mergedCache.h === outH
-          ? this._mergedCache.bitmap : null;
-        if (!bitmap) {
-          let developed = false;
+        let bitmap = null, crop = null, developed = false;
+        if (params.crop) {
+          // zoomed view: render only the visible region at pane resolution (never cached —
+          // every pan/zoom position would otherwise pin a pane-sized bitmap)
           try {
             const dev = await this.developSourceCached('merged', () => ({ ...m, data: m.pixels }));
-            bitmap = downsampleRGBA(dev.rgba, dev.width, dev.height, outW, outH);
+            const wx0 = Math.round(params.crop.x * dev.width), wy0 = Math.round(params.crop.y * dev.height);
+            const wx1 = Math.max(wx0 + 1, Math.round((params.crop.x + params.crop.w) * dev.width));
+            const wy1 = Math.max(wy0 + 1, Math.round((params.crop.y + params.crop.h) * dev.height));
+            bitmap = downsampleRGBAWindow(dev.rgba, dev.width, dev.height, wx0, wy0, wx1, wy1, outW, outH);
+            crop = params.crop;
             developed = true;
           } catch (err) {
             console.warn('merged RGB develop failed; using the gray view', err);
           }
+        }
+        if (!bitmap && !params.crop) {
+          bitmap = this._mergedCache && this._mergedCache.w === outW && this._mergedCache.h === outH
+            ? this._mergedCache.bitmap : null;
           if (!bitmap) {
-            const values = downsampleU16(m.pixels, m.width, m.height, outW, outH);
-            const black = m.blackLevel.reduce((a, b) => a + b, 0) / m.blackLevel.length;
-            let max = 0;
-            for (let i = 0; i < values.length; i++) {
-              values[i] -= black;
-              if (values[i] > max) max = values[i];
+            try {
+              const dev = await this.developSourceCached('merged', () => ({ ...m, data: m.pixels }));
+              bitmap = downsampleRGBA(dev.rgba, dev.width, dev.height, outW, outH);
+              developed = true;
+            } catch (err) {
+              console.warn('merged RGB develop failed; using the gray view', err);
             }
-            bitmap = grayBitmapFromValues(values, outW, outH, Math.max(max, 1e-6));
+            if (!bitmap) {
+              const values = downsampleU16(m.pixels, m.width, m.height, outW, outH);
+              const black = m.blackLevel.reduce((a, b) => a + b, 0) / m.blackLevel.length;
+              let max = 0;
+              for (let i = 0; i < values.length; i++) {
+                values[i] -= black;
+                if (values[i] > max) max = values[i];
+              }
+              bitmap = grayBitmapFromValues(values, outW, outH, Math.max(max, 1e-6));
+            }
+            this._mergedCache = { w: outW, h: outH, bitmap, developed };
           }
-          this._mergedCache = { w: outW, h: outH, bitmap, developed };
+          developed = this._mergedCache.developed;
         }
         return {
           bitmap,
-          info: this._mergedCache.developed
+          crop,
+          info: developed
             ? `merged result of ${m.count} frames · developed RGB (demosaic, WB, color matrix, sRGB) · "Download DNG" below`
             : `merged result of ${m.count} frames · gray tonemap (flashraw develop failed) · "Download DNG" below`,
         };
@@ -652,7 +682,9 @@ export class InspectionSession {
         // preferred path: true RGB — the frame's Bayer data (or the warped plane,
         // converted back to u16 Bayer) is developed with the whole flashraw chain and
         // box-averaged to the display size, cached per (frame, view, shift, size).
-        const rgb = await this.developedPhotoView(params.mode, idx, params.outWidth, params.outHeight, params.anchor);
+        // Zoomed-in views pass a normalized `crop`: only the visible region is rendered,
+        // at pane resolution, so detail stays 1:1 with the screen at any zoom.
+        const rgb = await this.developedPhotoView(params.mode, idx, params.outWidth, params.outHeight, params.anchor, params.crop || null);
         if (rgb) {
           const DEV = 'developed RGB (demosaic, as-shot WB, color matrix, sRGB)';
           const info = params.mode === 'reference'
@@ -662,7 +694,7 @@ export class InspectionSession {
               : (params.anchor && !f.isRef
                   ? `original frame, shifted by (${rgb.dx}, ${rgb.dy}) l0-px to match the anchor · ${DEV}`
                   : `original frame, exposure-equalized · ${DEV}`);
-          return { bitmap: rgb.bitmap, info };
+          return { bitmap: rgb.bitmap, info, crop: params.crop || null };
         }
         // fallback: the original gray tonemap (flashraw unavailable / develop failed)
         let plane, owned, info;

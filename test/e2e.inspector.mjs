@@ -306,6 +306,31 @@ try {
     box.border[3] === 255 && box.border[0] > 200 && box.border[1] < 60 && box.border[2] < 60,
     `border px=${box.border}`);
 
+  // zoomed photo views render the visible crop at pane device resolution (1:1 detail
+  // at any zoom depth), not a CSS-stretched fit-size bitmap
+  await page.click('#inspModes button[data-mode="original"]');
+  await new Promise((r) => setTimeout(r, 600));
+  await page.evaluate(() => {
+    const insp = window.__inspector;
+    insp.setZoom(4, { clientX: 200, clientY: 200 });
+  });
+  await new Promise((r) => setTimeout(r, 700));
+  const cropRender = await page.evaluate(() => {
+    const c = document.getElementById('inspCanvas');
+    const wrap = document.getElementById('inspImageWrap');
+    return {
+      pos: c.style.position, crop: !!window.__inspector._renderedCrop,
+      bmp: c.width, deviceTarget: Math.round(wrap.clientWidth * Math.min(window.devicePixelRatio || 1, 2)),
+      css: c.clientWidth, wrapW: wrap.clientWidth,
+    };
+  });
+  check('zoomed photo view renders the visible crop at pane device resolution',
+    cropRender.pos === 'absolute' && cropRender.crop &&
+    Math.abs(cropRender.bmp - cropRender.deviceTarget) <= 8 && Math.abs(cropRender.css - cropRender.wrapW) <= 4,
+    JSON.stringify(cropRender));
+  await page.evaluate(() => { window.__inspector.setZoom(1); });
+  await new Promise((r) => setTimeout(r, 400));
+
   // arrow-key scrub moves the selection (in frame order)
   await page.click('#inspColHead button[data-sort="0"]');
   await page.evaluate(() => {
@@ -327,10 +352,13 @@ try {
   await new Promise((r) => setTimeout(r, 300));
   const zoomed = await page.evaluate(() => ({
     badge: document.getElementById('inspZoomBadge').hidden === false,
-    scale: parseFloat(document.getElementById('inspCanvas').style.width) / document.getElementById('inspCanvas').width,
+    zoom: window.__inspector.state.zoom,
+    // holder spans the whole image at the zoomed css extent
+    holderW: document.getElementById('inspCanvasHolder').clientWidth,
+    wrapW: document.getElementById('inspImageWrap').clientWidth,
   }));
-  check('wheel zooms the image', zoomed.badge && zoomed.scale > 1.3,
-    `badge=${zoomed.badge} scale=${zoomed.scale.toFixed(2)}`);
+  check('wheel zooms the image', zoomed.badge && zoomed.zoom > 1.3 && zoomed.holderW > zoomed.wrapW,
+    `badge=${zoomed.badge} zoom=${zoomed.zoom.toFixed(2)} holder=${zoomed.holderW}px wrap=${zoomed.wrapW}px`);
   await page.keyboard.press('Escape'); // no ROI yet — must be a no-op
   await page.evaluate(() => { window.__inspector.state.zoom = 1; window.__inspector.applyCanvasSize(); });
   await new Promise((r) => setTimeout(r, 200));

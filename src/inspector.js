@@ -55,9 +55,8 @@ export class InspectorUI {
       diffGainLabel: $('inspDiffGainLabel'),
       diffGain: $('inspDiffGain'),
       clearAnchor: $('inspClearAnchor'),
-      sort: $('inspSort'),
-      roiHint: $('inspRoiHint'),
       clearRoi: $('inspClearRoi'),
+      colHead: $('inspColHead'),
       frameList: $('inspFrameList'),
       imageWrap: $('inspImageWrap'),
       holder: $('inspCanvasHolder'),
@@ -298,11 +297,11 @@ export class InspectorUI {
       this.refreshToolbar();
       this.scheduleRender();
     });
-    el.sort.addEventListener('click', (e) => {
+    el.colHead.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-sort]');
       if (!btn) return;
       this.state.sortMode = Number(btn.dataset.sort);
-      for (const b of el.sort.querySelectorAll('button')) b.classList.toggle('active', b === btn);
+      for (const b of el.colHead.querySelectorAll('button')) b.classList.toggle('active', b === btn);
       this.rebuildOrder();
     });
     el.clearRoi.addEventListener('click', () => this.setRoi(null));
@@ -429,7 +428,6 @@ export class InspectorUI {
   setRoi(roi) {
     this.state.roi = roi;
     this.el.clearRoi.hidden = !roi;
-    this.el.roiHint.hidden = !!roi;
     // while the user has not taken manual control of the anchor, it follows the subject area
     if (!this.state.anchorManual) {
       this.state.anchor = roi ? this.sceneAnchor((roi.x0 + roi.x1) / 2, (roi.y0 + roi.y1) / 2) : null;
@@ -871,6 +869,6 @@ export class InspectorUI {
     const calibText = calibrating ? ` · measuring shared scale… ${this.session.calibrationProgress}/${this.session.comparisonFrames().length}` : '';
     this.el.statsLine.textContent = stats + calibText;
     this.el.infoLine.textContent = [s.renderedInfo, anchorText].filter(Boolean).join('')
-      + '  — ↑/↓ frame · ←/→ mode · space = check · click = anchor · wheel = zoom, double-click reset';
+      + '  — ↑/↓ frame · ←/→ mode · space = check · click = anchor, drag = subject area · wheel = zoom, double-click reset';
   }
 }

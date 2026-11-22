@@ -94,20 +94,31 @@
     .insp-ctl { display: flex; align-items: center; gap: 0.45rem; font-size: 0.78rem; color: #8a929c; }
     .insp-ctl input[type="range"] { width: 110px; }
     .insp-ctl input[type="checkbox"] { accent-color: #4a9eff; }
-    #inspClearAnchor { font-size: 0.75rem; padding: 0.2rem 0.6rem; cursor: pointer; }
+    #inspClearAnchor, #inspClearRoi { font-size: 0.75rem; padding: 0.2rem 0.6rem; cursor: pointer; }
     #inspMain { flex: 1; display: flex; min-height: 0; }
     #inspSidebar {
       flex: 0 0 252px; display: flex; flex-direction: column; min-height: 0;
       background: #111418; border-right: 1px solid #22272e;
     }
-    #inspListHead { display: flex; align-items: center; gap: 0.4rem; padding: 0.45rem 0.5rem 0.15rem; }
-    #inspListHead .hint-text { font-size: 0.65rem; color: #5a626b; }
-    #inspClearRoi { font-size: 0.65rem; padding: 0.1rem 0.4rem; cursor: pointer; margin-left: auto; }
+    /* sortable table header — column boxes match .insp-row's (14px check, 44px thumb,
+       flex meta, two 40px right-aligned score cells, 6px gaps, 0.4rem+4px side padding) */
     #inspColHead {
-      display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0 0.9rem 0.2rem 0;
+      display: flex; align-items: center; gap: 6px;
+      padding: 0.3rem calc(0.4rem + 4px) 0.3rem;
       font-size: 0.62rem; color: #5a626b;
     }
-    #inspColHead span { width: 40px; text-align: right; }
+    #inspColHead .h-sp { flex: none; }
+    #inspColHead .h-check { width: 14px; }
+    #inspColHead .h-thumb { width: 44px; }
+    #inspColHead .h-fill { flex: 1; }
+    #inspColHead button {
+      width: 40px; padding: 0; border: 0; background: none; text-align: right;
+      font: inherit; color: inherit; cursor: pointer;
+    }
+    #inspColHead button:first-of-type { width: auto; }
+    #inspColHead button:hover { color: #aab4bf; }
+    #inspColHead button.active { color: #4a9eff; font-weight: 600; }
+    #inspColHead button.active::after { content: " ▲"; font-size: 0.55rem; }
     #inspFrameList { flex: 1; overflow-y: auto; padding: 0.25rem 0.4rem 0.5rem; }
     .insp-row {
       display: flex; align-items: center; gap: 6px; padding: 4px;
@@ -268,19 +279,17 @@
             <input type="range" id="inspDiffGain" min="0.5" max="20" step="0.5" value="4">
           </span>
           <button id="inspClearAnchor" hidden>Clear anchor</button>
+          <button id="inspClearRoi" hidden>Clear subject</button>
         </div>
         <div id="inspMain">
           <div id="inspSidebar">
-            <div id="inspListHead">
-              <div class="seg small" id="inspSort">
-                <button data-sort="0" class="active">frame</button>
-                <button data-sort="1">diff</button>
-                <button data-sort="2">align</button>
-              </div>
-              <span class="hint-text" id="inspRoiHint">drag on image to mark subject</span>
-              <button id="inspClearRoi" hidden>Clear subject</button>
+            <div id="inspColHead">
+              <span class="h-sp h-check"></span><span class="h-sp h-thumb"></span>
+              <button data-sort="0" class="active" title="Capture order">frame</button>
+              <span class="h-fill"></span>
+              <button data-sort="1" title="Mean difference to the reference inside the subject area (lower = more similar)">diff</button>
+              <button data-sort="2" title="Variation of the alignment field inside the subject area (lower = cleaner mapping)">align</button>
             </div>
-            <div id="inspColHead"><span title="Mean difference to the reference inside the subject area (lower = more similar)">diff</span><span title="Variation of the alignment field inside the subject area (lower = cleaner mapping)">align</span></div>
             <div id="inspFrameList"></div>
           </div>
           <div id="inspImageWrap">

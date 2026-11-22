@@ -172,12 +172,16 @@ try {
     byName['d_subject.dng'].diff > byName['a_ref.dng'].diff,
     `diff a_ref=${byName['a_ref.dng'].diff.toFixed(1)} subject=${byName['d_subject.dng'].diff.toFixed(1)}`);
 
-  // sorting by alignment score must move the reference row to the top and the subject frame last
-  await page.click('#inspSort button[data-sort="2"]');
+  // sorting by alignment score (table header) must move the reference row to the top and the
+  // subject frame last, and mark the header cell active
+  await page.click('#inspColHead button[data-sort="2"]');
   const sortedNames = await page.evaluate(() =>
     [...document.querySelectorAll('.insp-row .insp-file')].map((e) => e.textContent));
   check('align-sort: reference pinned first', sortedNames[0] === 'c_identical.dng', sortedNames.join(', '));
   check('align-sort: subject-motion frame ranked last', sortedNames[sortedNames.length - 1] === 'd_subject.dng');
+  const activeHeader = await page.evaluate(() =>
+    document.querySelector('#inspColHead button.active')?.dataset.sort);
+  check('sort header marks the active column', activeHeader === '2', `active=${activeHeader}`);
 
   // exclude the subject frame via its checkbox
   await page.evaluate(() => {
@@ -197,7 +201,7 @@ try {
   check('render info present after mode switches', infoAfterModes.length > 20, infoAfterModes.slice(0, 90));
 
   // arrow-key scrub moves the selection (in frame order)
-  await page.click('#inspSort button[data-sort="0"]');
+  await page.click('#inspColHead button[data-sort="0"]');
   await page.evaluate(() => {
     const row = [...document.querySelectorAll('.insp-row')].find((r) => r.querySelector('.insp-file').textContent === 'b_shifted.dng');
     row.click();

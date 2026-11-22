@@ -1,0 +1,241 @@
+// End-to-end inspector test: generates a synthetic DNG burst, loads it through the real UI
+// (file input → decode → alignment inspection → frame selection → merge → preview) in a
+// WebGPU-capable Chrome, and verifies the inspector behavior end to end.
+//
+// Usage: node test/e2e.inspector.mjs   (starts its own server on :8124, opens a Chrome window)
+// Requires: Google Chrome at the default macOS path (override via CHROME_BIN).
+
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import puppeteer from 'puppeteer-core';
+import { writeDNG } from '../src/dng_writer.js';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const port = 8124;
+const chromePath = process.env.CHROME_BIN ||
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm',
+  '.json': 'application/json; charset=utf-8',
+};
+
+const server = createServer(async (req, res) => {
+  try {
+    let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+    if (p === '/') p = '/index.html';
+    const file = normalize(join(root, p));
+    if (!file.startsWith(root)) throw new Error('traversal');
+    const data = await readFile(file);
+    if (!res.headersSent) {
+      res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream' });
+      res.end(data);
+    }
+  } catch {
+    if (!res.headersSent) res.writeHead(404);
+    res.end();
+  }
+}).listen(port);
+
+await new Promise((r) => server.on('listening', r));
+
+const browser = await puppeteer.launch({
+  executablePath: chromePath,
+  headless: false,
+  args: ['--window-size=1280,900', '--enable-unsafe-webgpu'],
+});
+
+let failures = 0;
+const check = (label, ok, detail = '') => {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
+  if (!ok) failures++;
+};
+
+// ---- synthetic burst: 256x256 RGGB DNGs (a 7x7 tile grid at the default tile size 32);
+// ref, shifted by (4,2), identical, subject motion ----
+const W = 256, H = 256, BLACK = [200, 204, 200, 206], WHITE = 4000;
+const texture = (x, y) => {
+  // classic hash coordinates (127.1, 311.7 — no spurious small-period aliasing, unlike
+  // 12.9898/78.233 whose ~6 px ratio creates shift ties); amplitude near full range to make
+  // tile costs discriminate shifts sharply
+  const detail = (Math.sin(x * 127.1 + y * 311.7) * 43758.5453) % 1;
+  return Math.min(WHITE - 260, Math.round(80 + 3.0 * x + 2.0 * y + 10 * Math.sin(x * 0.35) * Math.cos(y * 0.3) + 150 * detail));
+};
+const mkPixels = (dx = 0, dy = 0) => {
+  const pixels = new Uint16Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const cell = (y % 2) * 2 + (x % 2);
+      const xs = Math.min(Math.max(x - dx, 0), W - 1), ys = Math.min(Math.max(y - dy, 0), H - 1);
+      pixels[y * W + x] = BLACK[cell] + texture(xs, ys);
+    }
+  }
+  return pixels;
+};
+// a frame with a locally displaced subject block (moving subject): the block spans several
+// alignment tiles and is displaced by a few tiles' worth of sensor pixels
+// a frame with a locally displaced subject block (moving subject): the block spans a full
+// tile region (tile = 64 sensor px at level 0) so its tiles must disagree with the rest
+const mkSubjectDNG = () => {
+  const pixels = mkPixels();
+  for (let y = 64; y < 192; y++) {
+    for (let x = 64; x < 192; x++) {
+      const cell = (y % 2) * 2 + (x % 2);
+      pixels[y * W + x] = BLACK[cell] + texture(x - 7, y - 5);
+    }
+  }
+  return pixels;
+};
+const dngOptions = {
+  width: W, height: H, blackLevel: BLACK, whiteLevel: WHITE, cfa: [0, 1, 1, 2],
+  colorMatrix: [0.9505, 0, -0.0006, 0.3181, 0.7288, 0.0248, 0.0447, -0.0178, 0.9622],
+  orientation: 1, make: 'TestCam', model: 'PoC-1', whiteBalance: [2.1, 1, 1.9, 1],
+  exif: { exposureTime: 0.032, iso: 25, fNumber: 4, focalLength: 50, captureTime: '2024-06-01T12:00:00Z' },
+};
+const bursts = {
+  'a_ref.dng': mkPixels(),
+  'b_shifted.dng': mkPixels(4, 2),
+  'c_identical.dng': mkPixels(),
+  'd_subject.dng': mkSubjectDNG(),
+};
+const dngBase64 = Object.fromEntries(Object.entries(bursts).map(([name, pixels]) => [
+  name, Buffer.from(writeDNG(pixels, dngOptions)).toString('base64'),
+]));
+
+const pageErrors = [];
+try {
+  const page = await browser.newPage();
+  // uncaught page exceptions only — console resource 404s (vendored flashraw fallback) are expected in dev
+  page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 300)));
+  await page.setViewport({ width: 1280, height: 900 });
+  await page.goto(`http://localhost:${port}/`, { waitUntil: 'load' });
+
+  // inject the synthetic burst through the file input
+  await page.evaluate((files) => {
+    const toBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    for (const [name, b64] of Object.entries(files)) {
+      dt.items.add(new File([toBytes(b64)], name, { type: 'image/x-adobe-dng' }));
+    }
+    const input = document.getElementById('fileInput');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }, dngBase64);
+
+  // wait for the inspector pane to become visible
+  await page.waitForSelector('#inspectorPane:not([hidden])', { timeout: 60000 });
+
+  const insp = await page.evaluate(() => ({
+    rows: document.querySelectorAll('.insp-row').length,
+    refBadge: document.querySelectorAll('.insp-refbadge').length,
+    activeMode: document.querySelector('#inspModes button.active')?.dataset.mode,
+    mergeText: document.getElementById('inspMergeText').textContent,
+    mergeDisabled: document.getElementById('inspMerge').disabled,
+    stats: document.getElementById('inspStatsLine').textContent,
+  }));
+  check('inspector shown with one row per frame', insp.rows === 4, `${insp.rows} rows`);
+  check('reference row marked', insp.refBadge === 1);
+  check('default mode is Alignment', insp.activeMode === 'alignment', insp.activeMode);
+  check('merge enabled for all frames', !insp.mergeDisabled, insp.mergeText);
+  check('stats line names the selected frame', /frame 0/.test(insp.stats), insp.stats.slice(0, 60));
+
+  // wait for calibration to finish: every comparison row's diff score must become a number
+  // (the reference row shows "–" by design — it has no alignment field to score)
+  await page.waitForFunction(() => {
+    const rows = [...document.querySelectorAll('.insp-row')].filter((r) => !r.querySelector('.insp-refbadge'));
+    return rows.every((r) => r.children[3].textContent !== '–');
+  }, { timeout: 60000 });
+
+  const scores = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.insp-row')];
+    return rows.map((r) => ({
+      name: r.querySelector('.insp-file').textContent,
+      diff: parseFloat(r.children[3].textContent),
+      align: parseFloat(r.children[4].textContent),
+      included: r.querySelector('.insp-check').classList.contains('included'),
+    }));
+  });
+  const byName = Object.fromEntries(scores.map((s) => [s.name, s]));
+  check('all rows included initially', scores.every((s) => s.included));
+  // the burst center (c_identical) is the reference frame — a_ref.dng has identical content
+  check('identical-content frame has the lowest diff score',
+    byName['a_ref.dng'].diff <= byName['b_shifted.dng'].diff,
+    JSON.stringify(byName, null, 0).slice(0, 220));
+  check('subject-motion frame scores worst on alignment variation',
+    byName['d_subject.dng'].align > byName['a_ref.dng'].align &&
+    byName['d_subject.dng'].align > byName['b_shifted.dng'].align,
+    `align a_ref=${byName['a_ref.dng'].align.toFixed(2)} shifted=${byName['b_shifted.dng'].align.toFixed(2)} subject=${byName['d_subject.dng'].align.toFixed(2)}`);
+  check('subject-motion frame also scores worst on diff',
+    byName['d_subject.dng'].diff > byName['a_ref.dng'].diff,
+    `diff a_ref=${byName['a_ref.dng'].diff.toFixed(1)} subject=${byName['d_subject.dng'].diff.toFixed(1)}`);
+
+  // sorting by alignment score must move the reference row to the top and the subject frame last
+  await page.click('#inspSort button[data-sort="2"]');
+  const sortedNames = await page.evaluate(() =>
+    [...document.querySelectorAll('.insp-row .insp-file')].map((e) => e.textContent));
+  check('align-sort: reference pinned first', sortedNames[0] === 'c_identical.dng', sortedNames.join(', '));
+  check('align-sort: subject-motion frame ranked last', sortedNames[sortedNames.length - 1] === 'd_subject.dng');
+
+  // exclude the subject frame via its checkbox
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-file').textContent === 'd_subject.dng');
+    row.querySelector('.insp-check').click();
+  });
+  const mergeAfterExclude = await page.evaluate(() => document.getElementById('inspMerge').textContent);
+  check('merge counts excluded frame', /Merge 3 of 4 images/.test(mergeAfterExclude), mergeAfterExclude);
+
+  // mode switch to Difference and back renders without errors
+  await page.click('#inspModes button[data-mode="difference"]');
+  await new Promise((r) => setTimeout(r, 1500));
+  await page.click('#inspModes button[data-mode="alignment"]');
+  await new Promise((r) => setTimeout(r, 800));
+  const infoAfterModes = await page.evaluate(() => document.getElementById('inspInfoLine').textContent);
+  check('render info present after mode switches', infoAfterModes.length > 20, infoAfterModes.slice(0, 90));
+
+  // arrow-key scrub moves the selection (in frame order)
+  await page.click('#inspSort button[data-sort="0"]');
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('.insp-row')].find((r) => r.querySelector('.insp-file').textContent === 'b_shifted.dng');
+    row.click();
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  await page.keyboard.press('ArrowDown');
+  await new Promise((r) => setTimeout(r, 400));
+  const statsAfterDown = await page.evaluate(() => document.getElementById('inspStatsLine').textContent);
+  check('arrow-down selects the next frame', /frame 2/.test(statsAfterDown), statsAfterDown.slice(0, 60));
+
+  // merge the remaining 3 frames → preview + download
+  await page.click('#inspMerge');
+  await page.waitForSelector('#previewPane:not([hidden])', { timeout: 120000 });
+  const merged = await page.evaluate(() => ({
+    canvasW: document.getElementById('canvas').width,
+    href: document.getElementById('download').href.startsWith('blob:'),
+    disabled: document.getElementById('download').classList.contains('disabled'),
+  }));
+  check('merge produced a preview', merged.canvasW > 0, `canvas ${merged.canvasW}px`);
+  check('download link carries the merged DNG', merged.href && !merged.disabled);
+
+  check('no page errors during e2e run', pageErrors.length === 0,
+    pageErrors.slice(0, 3).join(' | '));
+} catch (err) {
+  console.log('FAIL  e2e test crashed —', String(err?.stack || err).slice(0, 1200));
+  if (pageErrors.length) console.log('page errors:', pageErrors.slice(0, 6).join('\n  '));
+  try {
+    const state = await page.evaluate(() => ({
+      stats: document.getElementById('inspStatsLine')?.textContent,
+      info: document.getElementById('inspInfoLine')?.textContent,
+      diffCells: [...document.querySelectorAll('.insp-row')].map((r) => r.children[3].textContent),
+    }));
+    console.log('page state:', JSON.stringify(state, null, 1).slice(0, 800));
+  } catch {}
+  failures++;
+} finally {
+  await browser.close();
+  server.close();
+}
+console.log(failures === 0 ? '\nE2E TEST PASSED' : `\n${failures} CHECK(S) FAILED`);
+process.exit(failures === 0 ? 0 : 1);

@@ -34,8 +34,8 @@ fn load_raw(raw: ptr<storage, array<u32>, read>, idx: u32) -> u32 {
 // the Metal expression (v - black)*2^(exposure_diff/100) + black simplifies to v, so
 // preparation is black-level-neutral (black is subtracted once at convert_to_u16).
 // Hot-pixel correction and exposure bracketing are omitted in the PoC.
-// Params: in_w, pad_left, pad_top
-struct PrepareParams { in_w: i32, pad_left: i32, pad_top: i32, };
+// Params: in_w, in_h, pad_left, pad_top
+struct PrepareParams { in_w: i32, in_h: i32, pad_left: i32, pad_top: i32, };
 @group(0) @binding(0) var<storage, read>       raw_in:    array<u32>;
 @group(0) @binding(1) var<storage, read_write> plane_out: array<f32>;
 @group(0) @binding(2) var<uniform>             prepare_p: PrepareParams;
@@ -44,6 +44,7 @@ struct PrepareParams { in_w: i32, pad_left: i32, pad_top: i32, };
 fn prepare_bayer(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let x = i32(gid3.x);
     let y = i32(gid3.y);
+    if (x >= prepare_p.in_w || y >= prepare_p.in_h) { return; }  // exact-dispatch guard
     let idx = y * prepare_p.in_w + x;
     let pixel_value = f32(load_raw(&raw_in, u32(idx)));
 
@@ -54,14 +55,15 @@ fn prepare_bayer(@builtin(global_invocation_id) gid3: vec3<u32>) {
 
 // ==================================================================== blur
 // Port of texture.metal:blur_mosaic_texture (separable binomial filter, verbatim).
-// Params: w (plane width), size (dim along blur direction), kernel_size, mosaic, direction
-struct BlurParams { w: i32, size: i32, kernel_size: i32, mosaic: i32, direction: i32, };
+// Params: w (plane width), h (plane height), size (dim along blur direction), kernel_size, mosaic, direction
+struct BlurParams { w: i32, h: i32, size: i32, kernel_size: i32, mosaic: i32, direction: i32, };
 @group(0) @binding(0) var<storage, read>       blur_in:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> blur_out: array<f32>;
 @group(0) @binding(2) var<uniform>             blur_p:   BlurParams;
 
 @compute @workgroup_size(8, 8)
 fn blur(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= blur_p.w || i32(gid3.y) >= blur_p.h) { return; }  // exact-dispatch guard
     // binomial kernel weights (truncated so removed weights contribute < 0.25%)
     var bw = array<f32, 9>(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     var kernel_size_trunc = blur_p.kernel_size;
@@ -102,14 +104,15 @@ fn blur(@builtin(global_invocation_id) gid3: vec3<u32>) {
 // ================================================================ avg_pool
 // Port of align.metal:avg_pool (verbatim; normalization variant not needed for
 // the spatial pipeline with uniform exposure).
-// Params: in_w, out_w, scale, black_level
-struct PoolParams { in_w: i32, out_w: i32, scale: i32, black_level: f32, };
+// Params: in_w, out_w, out_h, scale, black_level
+struct PoolParams { in_w: i32, out_w: i32, out_h: i32, scale: i32, black_level: f32, };
 @group(0) @binding(0) var<storage, read>       pool_in:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> pool_out: array<f32>;
 @group(0) @binding(2) var<uniform>             pool_p:   PoolParams;
 
 @compute @workgroup_size(8, 8)
 fn avg_pool(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= pool_p.out_w || i32(gid3.y) >= pool_p.out_h) { return; }  // exact-dispatch guard
     var out_pixel = 0.0;
     let x0 = i32(gid3.x) * pool_p.scale;
     let y0 = i32(gid3.y) * pool_p.scale;
@@ -123,8 +126,8 @@ fn avg_pool(@builtin(global_invocation_id) gid3: vec3<u32>) {
 
 // ======================================================= upsample_nearest_i32
 // Port of texture.metal:upsample_nearest_int for the alignment grid (i32 vec2).
-// Params: in_w, in_h, out_w, scale_x, scale_y
-struct UpsNNParams { in_w: i32, in_h: i32, out_w: i32, scale_x: f32, scale_y: f32, };
+// Params: in_w, in_h, out_w, out_h, scale_x, scale_y
+struct UpsNNParams { in_w: i32, in_h: i32, out_w: i32, out_h: i32, scale_x: f32, scale_y: f32, };
 @group(0) @binding(0) var<storage, read>       upsnn_in:  array<vec2<i32>>;
 @group(0) @binding(1) var<storage, read_write> upsnn_out: array<vec2<i32>>;
 @group(0) @binding(2) var<uniform>             upsnn_p:   UpsNNParams;
@@ -133,6 +136,7 @@ struct UpsNNParams { in_w: i32, in_h: i32, out_w: i32, scale_x: f32, scale_y: f3
 fn upsample_nearest_i32(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let x = i32(gid3.x);
     let y = i32(gid3.y);
+    if (x >= upsnn_p.out_w || y >= upsnn_p.out_h) { return; }  // exact-dispatch guard
     let sx = clampi(i32(round(f32(x) / upsnn_p.scale_x)), 0, upsnn_p.in_w - 1);
     let sy = clampi(i32(round(f32(y) / upsnn_p.scale_y)), 0, upsnn_p.in_h - 1);
     upsnn_out[y * upsnn_p.out_w + x] = upsnn_in[sy * upsnn_p.in_w + sx];
@@ -144,7 +148,7 @@ fn upsample_nearest_i32(@builtin(global_invocation_id) gid3: vec3<u32>) {
 // tile_diff is a flat array: index = (tile_y * n_tiles_x + tile_x) * n_pos_2d + pos
 // Params: level_w, level_h, n_tiles_x, tile_size, search_dist, downscale, weight_ssd
 struct CtdParams {
-    level_w: i32, level_h: i32, n_tiles_x: i32,
+    level_w: i32, level_h: i32, n_tiles_x: i32, n_tiles_y: i32,
     tile_size: i32, search_dist: i32, downscale: i32, weight_ssd: i32,
 };
 @group(0) @binding(0) var<storage, read>       ctd_ref:  array<f32>;
@@ -155,6 +159,7 @@ struct CtdParams {
 
 @compute @workgroup_size(8, 8, 1)
 fn compute_tile_differences(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= ctd_p.n_tiles_x || i32(gid3.y) >= ctd_p.n_tiles_y || i32(gid3.z) >= (2 * ctd_p.search_dist + 1) * (2 * ctd_p.search_dist + 1)) { return; }  // exact-dispatch guard
     let n_pos_1d = 2 * ctd_p.search_dist + 1;
 
     // tile position if previous alignment were 0
@@ -198,7 +203,7 @@ fn compute_tile_differences(@builtin(global_invocation_id) gid3: vec3<u32>) {
 // ================================================== find_best_tile_alignment
 // Port of align.metal:find_best_tile_alignment (verbatim).
 // Params: n_tiles_x, n_pos_1d, search_dist, downscale
-struct FbtaParams { n_tiles_x: i32, n_pos_1d: i32, search_dist: i32, downscale: i32, };
+struct FbtaParams { n_tiles_x: i32, n_tiles_y: i32, n_pos_1d: i32, search_dist: i32, downscale: i32, };
 @group(0) @binding(0) var<storage, read>       fbta_diff: array<f32>;
 @group(0) @binding(1) var<storage, read>       fbta_prev: array<vec2<i32>>;
 @group(0) @binding(2) var<storage, read_write> fbta_out:   array<vec2<i32>>;
@@ -206,6 +211,7 @@ struct FbtaParams { n_tiles_x: i32, n_pos_1d: i32, search_dist: i32, downscale: 
 
 @compute @workgroup_size(8, 8)
 fn find_best_tile_alignment(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= fbta_p.n_tiles_x || i32(gid3.y) >= fbta_p.n_tiles_y) { return; }  // exact-dispatch guard
     let n_pos_2d = fbta_p.n_pos_1d * fbta_p.n_pos_1d;
     let tile = i32(gid3.y) * fbta_p.n_tiles_x + i32(gid3.x);
 
@@ -238,6 +244,7 @@ struct WarpParams {
 fn warp_bayer(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let x = i32(gid3.x);
     let y = i32(gid3.y);
+    if (x >= warp_p.in_w || y >= warp_p.in_h) { return; }  // exact-dispatch guard
     let hts = f32(warp_p.half_tile);
 
     let x_grid = (f32(x) + 0.5) / hts - 1.0;
@@ -270,8 +277,8 @@ fn warp_bayer(@builtin(global_invocation_id) gid3: vec3<u32>) {
 
 // ========================================================= color_difference
 // Port of merge/spatial.metal:color_difference (verbatim).
-// Params: w (plane width), mosaic
-struct CdParams { w: i32, mosaic: i32, };
+// Params: w (plane width), out_h, mosaic
+struct CdParams { w: i32, out_h: i32, mosaic: i32, };
 @group(0) @binding(0) var<storage, read>       cd_t1:  array<f32>;
 @group(0) @binding(1) var<storage, read>       cd_t2:  array<f32>;
 @group(0) @binding(2) var<storage, read_write> cd_out: array<f32>;
@@ -279,6 +286,7 @@ struct CdParams { w: i32, mosaic: i32, };
 
 @compute @workgroup_size(8, 8)
 fn color_difference(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.y) >= cd_p.out_h) { return; }  // exact-dispatch guard
     var total_diff = 0.0;
     let x0 = i32(gid3.x) * cd_p.mosaic;
     let y0 = i32(gid3.y) * cd_p.mosaic;
@@ -295,14 +303,15 @@ fn color_difference(@builtin(global_invocation_id) gid3: vec3<u32>) {
 // ===================================================== compute_merge_weight
 // Port of merge/spatial.metal:compute_merge_weight (verbatim; noise_sd passed
 // as a uniform scalar instead of a buffer).
-// Params: w (diff-plane width), noise_sd, robustness
-struct MwParams { w: i32, noise_sd: f32, robustness: f32, };
+// Params: w (diff-plane width), h, noise_sd, robustness
+struct MwParams { w: i32, h: i32, noise_sd: f32, robustness: f32, };
 @group(0) @binding(0) var<storage, read>       mw_diff:   array<f32>;
 @group(0) @binding(1) var<storage, read_write> mw_weight: array<f32>;
 @group(0) @binding(2) var<uniform>             mw_p:      MwParams;
 
 @compute @workgroup_size(8, 8)
 fn compute_merge_weight(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= mw_p.w || i32(gid3.y) >= mw_p.h) { return; }  // exact-dispatch guard
     let i = i32(gid3.y) * mw_p.w + i32(gid3.x);
     let diff = mw_diff[i];
     var weight: f32;
@@ -317,14 +326,15 @@ fn compute_merge_weight(@builtin(global_invocation_id) gid3: vec3<u32>) {
 
 // ========================================================= upsample_bilinear
 // Port of texture.metal:upsample_bilinear_float (verbatim; reads clamped).
-// Params: in_w, in_h, out_w, scale_x, scale_y
-struct UpsBLParams { in_w: i32, in_h: i32, out_w: i32, scale_x: f32, scale_y: f32, };
+// Params: in_w, in_h, out_w, out_h, scale_x, scale_y
+struct UpsBLParams { in_w: i32, in_h: i32, out_w: i32, out_h: i32, scale_x: f32, scale_y: f32, };
 @group(0) @binding(0) var<storage, read>       upsbl_in:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> upsbl_out: array<f32>;
 @group(0) @binding(2) var<uniform>             upsbl_p:   UpsBLParams;
 
 @compute @workgroup_size(8, 8)
 fn upsample_bilinear(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= upsbl_p.out_w || i32(gid3.y) >= upsbl_p.out_h) { return; }  // exact-dispatch guard
     let x = f32(i32(gid3.x)) / upsbl_p.scale_x;
     let y = f32(i32(gid3.y)) / upsbl_p.scale_y;
     let epsilon = 1e-5;
@@ -360,8 +370,8 @@ fn upsample_bilinear(@builtin(global_invocation_id) gid3: vec3<u32>) {
 
 // ======================================================= add_texture_weighted
 // Port of texture.metal:add_texture_weighted (verbatim).
-// Params: w
-struct AtwParams { w: i32, };
+// Params: w, h
+struct AtwParams { w: i32, h: i32, };
 @group(0) @binding(0) var<storage, read>       atw_t1: array<f32>;
 @group(0) @binding(1) var<storage, read>       atw_t2: array<f32>;
 @group(0) @binding(2) var<storage, read>       atw_wt: array<f32>;
@@ -370,6 +380,7 @@ struct AtwParams { w: i32, };
 
 @compute @workgroup_size(8, 8)
 fn add_texture_weighted(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= atw_p.w || i32(gid3.y) >= atw_p.h) { return; }  // exact-dispatch guard
     let i = i32(gid3.y) * atw_p.w + i32(gid3.x);
     let intensity1 = atw_t1[i];
     let intensity2 = atw_t2[i];
@@ -379,22 +390,23 @@ fn add_texture_weighted(@builtin(global_invocation_id) gid3: vec3<u32>) {
 
 // ================================================================ accumulate
 // Port of texture.metal:add_texture: out += in / n_textures.
-// Params: w, n
-struct AccParams { w: i32, n: f32, };
+// Params: w, h, n
+struct AccParams { w: i32, h: i32, n: f32, };
 @group(0) @binding(0) var<storage, read>       acc_in:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> acc_out: array<f32>;
 @group(0) @binding(2) var<uniform>             acc_p:   AccParams;
 
 @compute @workgroup_size(8, 8)
 fn accumulate(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= acc_p.w || i32(gid3.y) >= acc_p.h) { return; }  // exact-dispatch guard
     let i = i32(gid3.y) * acc_p.w + i32(gid3.x);
     acc_out[i] = acc_out[i] + acc_in[i] / acc_p.n;
 }
 
 // ============================================================ convert_to_u16
 // Port of texture.metal:convert_float_to_uint16 (verbatim, with factor_16bit).
-// Params: w, white_level, factor_16bit, mosaic
-struct ConvParams { w: i32, white_level: i32, factor_16bit: i32, mosaic: i32, };
+// Params: w, h, white_level, factor_16bit, mosaic
+struct ConvParams { w: i32, h: i32, white_level: i32, factor_16bit: i32, mosaic: i32, };
 @group(0) @binding(0) var<storage, read>       conv_in:    array<f32>;
 @group(0) @binding(1) var<storage, read>       conv_black: array<f32>;
 @group(0) @binding(2) var<storage, read_write> conv_out:   array<u32>;
@@ -404,6 +416,7 @@ struct ConvParams { w: i32, white_level: i32, factor_16bit: i32, mosaic: i32, };
 fn convert_to_u16(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let x = i32(gid3.x);
     let y = i32(gid3.y);
+    if (x >= conv_p.w || y >= conv_p.h) { return; }  // exact-dispatch guard
     let black_level = conv_black[u32((y % conv_p.mosaic) + conv_p.mosaic * (x % conv_p.mosaic))];
     var out_value = i32(round(f32(conv_p.factor_16bit) * (conv_in[y * conv_p.w + x] - black_level) + black_level));
     out_value = clampi(out_value, 0, min(conv_p.white_level, i32(UINT16_MAX_VAL)));
@@ -412,14 +425,15 @@ fn convert_to_u16(@builtin(global_invocation_id) gid3: vec3<u32>) {
 
 // ================================================================ crop
 // Port of texture.metal:crop_texture (verbatim).
-// Params: in_w, out_w, pad_left, pad_top
-struct CropParams { in_w: i32, out_w: i32, pad_left: i32, pad_top: i32, };
+// Params: in_w, out_w, out_h, pad_left, pad_top
+struct CropParams { in_w: i32, out_w: i32, out_h: i32, pad_left: i32, pad_top: i32, };
 @group(0) @binding(0) var<storage, read>       crop_in:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> crop_out: array<f32>;
 @group(0) @binding(2) var<uniform>             crop_p:   CropParams;
 
 @compute @workgroup_size(8, 8)
 fn crop(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= crop_p.out_w || i32(gid3.y) >= crop_p.out_h) { return; }  // exact-dispatch guard
     let x = i32(gid3.x) + crop_p.pad_left;
     let y = i32(gid3.y) + crop_p.pad_top;
     crop_out[i32(gid3.y) * crop_p.out_w + i32(gid3.x)] = crop_in[y * crop_p.in_w + x];
@@ -436,6 +450,7 @@ struct PoolAParams { in_w: i32, in_h: i32, out_w: i32, out_h: i32, };
 
 @compute @workgroup_size(8, 8)
 fn area_pool_f32(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= pa_p.out_w || i32(gid3.y) >= pa_p.out_h) { return; }  // exact-dispatch guard
     let ox = i32(gid3.x);
     let oy = i32(gid3.y);
     let x0 = i32(floor(f32(ox) * f32(pa_p.in_w) / f32(pa_p.out_w)));
@@ -467,6 +482,7 @@ struct Diff8Params {
 
 @compute @workgroup_size(8, 8)
 fn diff_rgba8(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= d8_p.out_w || i32(gid3.y) >= d8_p.out_h) { return; }  // exact-dispatch guard
     let ox = i32(gid3.x);
     let oy = i32(gid3.y);
     let x0 = i32(floor(f32(ox) * f32(d8_p.in_w) / f32(d8_p.out_w)));
@@ -507,6 +523,7 @@ struct Gray8Params { in_w: i32, in_h: i32, out_w: i32, out_h: i32, white_point: 
 
 @compute @workgroup_size(8, 8)
 fn gray_rgba8(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= g8_p.out_w || i32(gid3.y) >= g8_p.out_h) { return; }  // exact-dispatch guard
     let ox = i32(gid3.x);
     let oy = i32(gid3.y);
     let x0 = i32(floor(f32(ox) * f32(g8_p.in_w) / f32(g8_p.out_w)));
@@ -529,8 +546,8 @@ fn gray_rgba8(@builtin(global_invocation_id) gid3: vec3<u32>) {
 // Port of viz.metal:abs_difference (incl. brightness-match gain/offset): full-resolution
 // per-pixel absolute difference |ref - (gain*comp + offset)| as an f32 plane, for render-time
 // statistics (mean |diff| via the sum kernels) and re-use in other render paths.
-// Params: w, gain, offset
-struct DiffFParams { w: i32, gain: f32, offset: f32, };
+// Params: w, h, gain, offset
+struct DiffFParams { w: i32, h: i32, gain: f32, offset: f32, };
 @group(0) @binding(0) var<storage, read>       df_ref:  array<f32>;
 @group(0) @binding(1) var<storage, read>       df_comp: array<f32>;
 @group(0) @binding(2) var<storage, read_write> df_out:  array<f32>;
@@ -538,6 +555,7 @@ struct DiffFParams { w: i32, gain: f32, offset: f32, };
 
 @compute @workgroup_size(8, 8)
 fn diff_f32(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= df_p.w || i32(gid3.y) >= df_p.h) { return; }  // exact-dispatch guard
     let i = i32(gid3.y) * df_p.w + i32(gid3.x);
     df_out[i] = abs(df_ref[i] - (df_p.gain * df_comp[i] + df_p.offset));
 }

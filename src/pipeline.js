@@ -118,7 +118,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
     const texDiff = colorDifference(gpu, refBlurred, compBlurred, mosaic);
     const weight = new Plane(gpu.zeros('merge-weight', texDiff.size), texDiff.w, texDiff.h);
     gpu.dispatch('compute_merge_weight',
-      [{ buffer: texDiff.buf }, { buffer: weight.buf }, { buffer: packUniforms(['i32', 'f32', 'f32'], [texDiff.w, noiseSd, robustness]) }], groups(texDiff.w, texDiff.h));
+      [{ buffer: texDiff.buf }, { buffer: weight.buf }, { buffer: packUniforms(['i32', 'i32', 'f32', 'f32'], [texDiff.w, texDiff.h, noiseSd, robustness]) }], groups(texDiff.w, texDiff.h));
 
     const weightUp = upsampleBilinear(gpu, weight, W, H);
     const merged = addWeighted(gpu, refCropped, aligned, weightUp);
@@ -155,7 +155,7 @@ export async function alignMergeSpatial(gpu, frames, options, onProgress) {
   const u16Plane = new Plane(gpu.zeros('out-u16', W * H * 4), W, H);
   gpu.dispatch('convert_to_u16',
     [{ buffer: outPlane.buf }, { buffer: refBlack4 }, { buffer: u16Plane.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32'], [W, whiteLevel, 1, mosaic]) }], groups(W, H));
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [W, H, whiteLevel, 1, mosaic]) }], groups(W, H));
 
   const raw = await gpu.readBack(u16Plane.buf, W * H * 4);
   const u32 = new Uint32Array(raw);
@@ -184,7 +184,7 @@ export async function prepareFrame(gpu, frame, padX, padY) {
   const out = new Plane(gpu.zeros(`prepared-${frame.name ?? ''}`, (W + 2 * padX) * (H + 2 * padY) * 4), W + 2 * padX, H + 2 * padY);
   gpu.dispatch('prepare_bayer',
     [{ buffer: rawBuf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32'], [W, padX, padY]) }], groups(W, H));
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32'], [W, H, padX, padY]) }], groups(W, H));
   // rawBuf: queue.writeBuffer already ran; destroy after the work is enqueued is fine,
   // but keep it alive until submit — dispatch submits synchronously, so destroy now.
   rawBuf.destroy();
@@ -213,7 +213,7 @@ function blurPlane(gpu, plane, kernelSize, mosaicPatternWidth) {
   const tmp = new Plane(gpu.zeros('blur-tmp', plane.size), plane.w, plane.h);
   const out = new Plane(gpu.zeros('blur-out', plane.size), plane.w, plane.h);
   const mkParams = (size, dir) =>
-    packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [plane.w, size, kernelSize, mosaicPatternWidth, dir]);
+    packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32'], [plane.w, plane.h, size, kernelSize, mosaicPatternWidth, dir]);
   gpu.dispatch('blur', [{ buffer: plane.buf }, { buffer: tmp.buf }, { buffer: mkParams(plane.w, 0) }], groups(plane.w, plane.h));
   gpu.dispatch('blur', [{ buffer: tmp.buf }, { buffer: out.buf }, { buffer: mkParams(plane.h, 1) }], groups(plane.w, plane.h));
   tmp.buf.destroy();
@@ -226,7 +226,7 @@ export function avgPool(gpu, plane, scale, blackLevel) {
   const out = new Plane(gpu.zeros('pool-out', outW * outH * 4), outW, outH);
   gpu.dispatch('avg_pool',
     [{ buffer: plane.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'f32'], [plane.w, outW, scale, blackLevel]) }], groups(outW, outH));
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'f32'], [plane.w, outW, outH, scale, blackLevel]) }], groups(outW, outH));
   return out;
 }
 
@@ -236,7 +236,7 @@ export function crop(gpu, plane, padX, padY) {
   const out = new Plane(gpu.zeros('crop-out', outW * outH * 4), outW, outH);
   gpu.dispatch('crop',
     [{ buffer: plane.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32'], [plane.w, outW, padX, padY]) }], groups(outW, outH));
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [plane.w, outW, outH, padX, padY]) }], groups(outW, outH));
   return out;
 }
 
@@ -244,7 +244,7 @@ function upsampleNearest(gpu, align, outW, outH) {
   const out = new Plane(gpu.zeros('align-up', outW * outH * 8), outW, outH); // vec2<i32>
   gpu.dispatch('upsample_nearest_i32',
     [{ buffer: align.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'f32', 'f32'], [align.w, align.h, outW, outW / align.w, outH / align.h]) }], groups(outW, outH));
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'f32', 'f32'], [align.w, align.h, outW, outH, outW / align.w, outH / align.h]) }], groups(outW, outH));
   return out;
 }
 
@@ -280,13 +280,13 @@ export function alignTextureEx(gpu, refPyramid, compPadded, { nLevels, downscale
     const useSsd = i !== 0 ? 1 : 0; // L2 on coarse levels, L1 on the finest level
     gpu.dispatch('compute_tile_differences',
       [{ buffer: refLayer.buf }, { buffer: compLayer.buf }, { buffer: prevUp.buf }, { buffer: tileDiff.buf },
-       { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32', 'i32'],
-         [compLayer.w, compLayer.h, nTilesX, tile, 2, downscale, useSsd]) }], [Math.ceil(nTilesX / 8), Math.ceil(nTilesY / 8), nPos2d]);
+       { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32', 'i32', 'i32'],
+         [compLayer.w, compLayer.h, nTilesX, nTilesY, tile, 2, downscale, useSsd]) }], [Math.ceil(nTilesX / 8), Math.ceil(nTilesY / 8), nPos2d]);
 
     const curAlign = new Plane(gpu.zeros('align-cur', nTilesX * nTilesY * 8), nTilesX, nTilesY);
     gpu.dispatch('find_best_tile_alignment',
       [{ buffer: tileDiff.buf }, { buffer: prevUp.buf }, { buffer: curAlign.buf },
-       { buffer: packUniforms(['i32', 'i32', 'i32', 'i32'], [nTilesX, nPos1d, 2, downscale]) }], groups(nTilesX, nTilesY));
+       { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [nTilesX, nTilesY, nPos1d, 2, downscale]) }], groups(nTilesX, nTilesY));
 
     if (prevAlign !== curAlign) prevAlign.buf.destroy();
     prevAlign = curAlign;
@@ -335,7 +335,7 @@ function colorDifference(gpu, plane1, plane2, mosaic) {
   const out = new Plane(gpu.zeros('color-diff', outW * outH * 4), outW, outH);
   gpu.dispatch('color_difference',
     [{ buffer: plane1.buf }, { buffer: plane2.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32'], [plane1.w, mosaic]) }], groups(outW, outH));
+     { buffer: packUniforms(['i32', 'i32', 'i32'], [plane1.w, outH, mosaic]) }], groups(outW, outH));
   return out;
 }
 
@@ -343,8 +343,8 @@ function upsampleBilinear(gpu, plane, outW, outH) {
   const out = new Plane(gpu.zeros('ups-bl', outW * outH * 4), outW, outH);
   gpu.dispatch('upsample_bilinear',
     [{ buffer: plane.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'f32', 'f32'],
-       [plane.w, plane.h, outW, outW / plane.w, outH / plane.h]) }], groups(outW, outH));
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'f32', 'f32'],
+       [plane.w, plane.h, outW, outH, outW / plane.w, outH / plane.h]) }], groups(outW, outH));
   return out;
 }
 
@@ -352,14 +352,14 @@ function addWeighted(gpu, plane1, plane2, weight) {
   const out = new Plane(gpu.zeros('add-weighted', plane1.size), plane1.w, plane1.h);
   gpu.dispatch('add_texture_weighted',
     [{ buffer: plane1.buf }, { buffer: plane2.buf }, { buffer: weight.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32'], [plane1.w]) }], groups(plane1.w, plane1.h));
+     { buffer: packUniforms(['i32', 'i32'], [plane1.w, plane1.h]) }], groups(plane1.w, plane1.h));
   return out;
 }
 
 function accumulate(gpu, outPlane, plane, nImages) {
   gpu.dispatch('accumulate',
     [{ buffer: plane.buf }, { buffer: outPlane.buf },
-     { buffer: packUniforms(['i32', 'f32'], [plane.w, nImages]) }], groups(plane.w, plane.h));
+     { buffer: packUniforms(['i32', 'i32', 'f32'], [plane.w, plane.h, nImages]) }], groups(plane.w, plane.h));
 }
 
 export async function sumToScalar(gpu, plane) {

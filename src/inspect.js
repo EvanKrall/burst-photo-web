@@ -138,6 +138,7 @@ export class InspectionSession {
   comparisonFrames() { return this.frameList.filter((f) => !f.isRef); }
 
   destroy() {
+    this.destroyed = true;
     this.refCropped?.buf.destroy();
     for (const b of this.gridBuffers.values()) b.destroy();
     this.zeroGrid?.destroy();
@@ -336,11 +337,13 @@ export class InspectionSession {
    * Build the downsampled per-frame data (warped + difference), warm the brightness-match
    * cache and measure the shared difference scale (median frame mean difference). Port of
    * InspectorModel.start_background_work. Idempotent; yields to the GPU between frames.
+   * The optional isCancelled callback (returning true) stops the pass early.
    */
-  async calibrate(onProgress) {
+  async calibrate(onProgress, isCancelled = null) {
     if (this.calibrating) return;
     this.calibrating = true;
     try {
+      if (this.destroyed) return;
       await this.ensureRefPooled();
       const refValues = this.refPooled.values;
       const pool = InspectionSession.pickPool(this.refCropped, 4);
@@ -379,7 +382,8 @@ export class InspectionSession {
         means.push(data.diffMean);
 
         this.calibrationProgress = n + 1;
-        onProgress?.({ frame: n + 1, total: comparisons.length });
+        const cancelled = onProgress?.({ frame: n + 1, total: comparisons.length }) === true;
+        if (cancelled || this.destroyed) return;
         // let the GPU + UI breathe between frames
         await this.device.queue.onSubmittedWorkDone();
       }
@@ -455,7 +459,7 @@ export class InspectionSession {
         const diffPlane = new Plane(this.gpu.zeros('diff-f32', ref.size), ref.w, ref.h);
         this.gpu.dispatch('diff_f32',
           [{ buffer: ref.buf }, { buffer: aligned.buf }, { buffer: diffPlane.buf },
-           { buffer: packUniforms(['i32', 'f32', 'f32'], [ref.w, gain, offset]) }],
+           { buffer: packUniforms(['i32', 'i32', 'f32', 'f32'], [ref.w, ref.h, gain, offset]) }],
           groups(ref.w, ref.h));
         const meanAbsDiff = await this.planeMean(diffPlane);
         diffPlane.buf.destroy();

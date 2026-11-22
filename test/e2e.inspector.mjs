@@ -6,8 +6,10 @@
 // Requires: Google Chrome at the default macOS path (override via CHROME_BIN).
 
 import { createServer } from 'node:http';
+import { mkdtempSync, readdirSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 import { writeDNG } from '../src/dng_writer.js';
@@ -46,6 +48,34 @@ const browser = await puppeteer.launch({
   executablePath: chromePath,
   headless: false,
   args: ['--window-size=1280,900', '--enable-unsafe-webgpu'],
+});
+
+// Route downloads into a temp dir and let the test wait for Chrome's 'completed'
+// event: closing the browser while a download is still in flight pops the
+// "Chrome is downloading — quit anyway?" dialog. Completing the download removes it.
+const downloadDir = mkdtempSync(join(tmpdir(), 'bpw-e2e-download-'));
+const browserCDP = await browser.target().createCDPSession();
+await browserCDP.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir, eventsEnabled: true });
+// Resolves with the downloaded file names once Chrome reports the download completed.
+const waitForDownload = (timeoutMs = 10000) => new Promise((resolve, reject) => {
+  const cleanup = () => {
+    clearTimeout(timer);
+    browserCDP.off('Browser.downloadProgress', onProgress);
+  };
+  const onProgress = (e) => {
+    if (e.state === 'completed') {
+      cleanup();
+      resolve(readdirSync(downloadDir));
+    } else if (e.state === 'canceled') {
+      cleanup();
+      reject(new Error('download was canceled'));
+    }
+  };
+  const timer = setTimeout(() => {
+    cleanup();
+    reject(new Error('download did not complete within 10 s'));
+  }, timeoutMs);
+  browserCDP.on('Browser.downloadProgress', onProgress);
 });
 
 let failures = 0;
@@ -392,8 +422,15 @@ try {
     name: document.getElementById('download').download,
   }));
   check('download link carries the merged DNG', merged.href && !merged.disabled, JSON.stringify(merged));
+  // click the merge bar's "Download DNG" and wait for Chrome to finish writing the file
+  // (a pending download at browser-quit pops the "quit anyway?" dialog)
+  const dlPromise = waitForDownload();
   await page.click('#inspDownloadDng');
-  await new Promise((r) => setTimeout(r, 300));
+  const downloaded = await dlPromise;
+  const size = statSync(join(downloadDir, downloaded[0])).size;
+  check('Download DNG lands the merged file on disk',
+    downloaded.length === 1 && downloaded[0].endsWith('.dng') && size > 100000,
+    `${downloaded.join(', ')} — ${(size / 1000).toFixed(0)} kB`);
 
   check('no page errors during e2e run', pageErrors.length === 0,
     pageErrors.slice(0, 3).join(' | '));

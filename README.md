@@ -37,16 +37,21 @@ motion-rejected). Both suites currently pass.
 
 ## Deploying (static hosting)
 
-The app is pure static files — no build step, no server code. Copy this layout
-anywhere that serves HTTPS:
+The app is pure static files — no bundler, no transpilation. Build the
+ deployable artifact with:
+
+```bash
+npm install && npm run build     # → dist/
+ROOT=dist npm start              # local check of the built artifact
+```
+
+dist/ contains exactly what a web server needs:
 
 ```
-site/
+dist/
 ├── index.html
 ├── src/                    # the 7 JS modules, unchanged
-│   ├── main.js  gpu.js  kernels.js  pipeline.js
-│   ├── raw.js   preview.js  dng_writer.js
-└── vendor/flashraw/dist/   # cp -r node_modules/flashraw/dist vendor/flashraw/dist
+└── vendor/flashraw/dist/   # flashraw JS glue + .wasm binaries
 ```
 
 - **HTTPS is required** — WebGPU only exists in secure contexts (localhost
@@ -54,15 +59,37 @@ site/
 - Serve `.wasm` as `application/wasm` (required for streaming compilation;
   GitHub Pages and most hosts do this already).
 - No COOP/COEP headers needed (the single-threaded decode path is used).
-- Works at a subpath (e.g. `example.com/burstphoto/`) — the vendored flashraw
-  path is resolved relative to `src/raw.js`.
-- `server.mjs`, `test/`, `package.json` are development-only and not deployed.
-- Without the `vendor/` folder the loader falls back to CDN ESM builds
-  (jsDelivr/esm.sh) — works, but vendoring is the reliable path since the
-  `.wasm` binaries are `import.meta.url` assets.
+- Works at a subpath (e.g. `example.com/burst-photo-web/`) — the vendored
+  flashraw path is resolved relative to `dist/src/raw.js`.
+- Size: ~24 MB of files on the server; visitors download ~1.5 MB gzipped
+  (app JS + `flashraw_simd.wasm`; other wasm variants are fetched only if the
+  corresponding feature is used, which this app never does).
 
-A `FlashRaw.init({ baseUrl })` override exists in flashraw if you prefer a
-different asset location.
+### Continuous deployment to evankrall.github.io
+
+`.github/workflows/deploy-pages.yml` builds `dist/` on every push to `main`
+and pushes it into the `EvanKrall/evankrall.github.io` repo under
+`burst-photo-web/`, published at https://www.evankrall.com/burst-photo-web/.
+
+One-time setup for the repo owner:
+
+```bash
+ssh-keygen -t ed25519 -C "burst-photo-web-pages-deploy" -f ./bpw_deploy_key
+```
+
+1. `bpw_deploy_key.pub` → **Deploy key with write access** on
+   `EvanKrall/evankrall.github.io` (Settings → Deploy keys).
+2. Contents of `bpw_deploy_key` → Actions secret `DEPLOY_KEY` on
+   `EvanKrall/burst-photo-web` (Settings → Secrets and variables → Actions).
+
+Caveat: if the Hugo pipeline for evankrall.github.io rebuilds the whole site
+and wipes unknown directories, either preserve `burst-photo-web/` there or
+run this workflow after the Hugo deploy. Manual deploys: `workflow_dispatch`
+is enabled (Actions tab → Deploy → Run workflow).
+
+Without the `vendor/` folder the loader falls back to CDN ESM builds
+(jsDelivr/esm.sh) — works, but vendoring is the reliable path since the
+`.wasm` binaries are `import.meta.url` assets.
 
 ## Running
 

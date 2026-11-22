@@ -1,0 +1,77 @@
+# Deploy the static site into the evankrall.github.io repository, published at
+# https://www.evankrall.com/burst-photo-web/
+#
+# One-time setup (repo owner):
+#   1. ssh-keygen -t ed25519 -C "burst-photo-web-pages-deploy" -f ./bpw_deploy_key
+#   2. Add ./bpw_deploy_key.pub as a Deploy Key on EvanKrall/evankrall.github.io
+#      with WRITE access (Settings → Deploy keys).
+#   3. Add the contents of ./bpw_deploy_key as the Actions secret `DEPLOY_KEY`
+#      on EvanKrall/burst-photo-web (Settings → Secrets and variables → Actions).
+#
+# NOTE: if the Hugo pipeline for evankrall.github.io rebuilds the whole site and
+# wipes unknown directories, either preserve `burst-photo-web/` there, or trigger
+# this workflow after the Hugo deploy.
+
+name: Deploy to evankrall.github.io
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-burst-photo-web
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Build dist/
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure SSH deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # TOFU: accept GitHub's current host keys at runtime (runner→github.com
+          # is not considered a MITM-relevant link for a static-site deploy)
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes"
+
+      - name: Checkout target Pages repo
+        run: git clone --depth 1 git@github.com:EvanKrall/evankrall.github.io.git pages-repo
+
+      - name: Copy dist/ into target subdirectory
+        run: |
+          mkdir -p pages-repo/burst-photo-web
+          find pages-repo/burst-photo-web -mindepth 1 -delete
+          cp -r dist/. pages-repo/burst-photo-web/
+
+      - name: Commit and push
+        run: |
+          cd pages-repo
+          git config user.name "burst-photo-web-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A burst-photo-web
+          if git diff --cached --quiet; then
+            echo "No changes to deploy."
+          else
+            git commit -m "deploy burst-photo-web from EvanKrall/burst-photo-web@${{ github.sha }}"
+            git push
+          fi

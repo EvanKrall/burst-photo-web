@@ -1,11 +1,14 @@
 // Minimal zero-dependency static file server for the PoC.
-// Usage: node server.mjs [port]   (default 8080)
+// Usage: node server.mjs [port]          (default 8080, serves repo root)
+//        ROOT=dist node server.mjs 8080  (serve the built dist/ output)
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('.', import.meta.url));
+const root = process.env.ROOT
+  ? resolve(process.env.ROOT)
+  : fileURLToPath(new URL('.', import.meta.url));
 const port = Number(process.argv[2]) || 8080;
 
 const MIME = {

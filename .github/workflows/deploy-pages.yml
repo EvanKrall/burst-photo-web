@@ -62,6 +62,12 @@ jobs:
           mkdir -p pages-repo/burst-photo-web
           find pages-repo/burst-photo-web -mindepth 1 -delete
           cp -r dist/. pages-repo/burst-photo-web/
+          # CRITICAL: without .nojekyll, GitHub Pages runs Jekyll over the branch
+          # and Jekyll excludes the burst-photo-web/ directory from the built
+          # artifact (observed 2026-11: dir missing after successful deploy).
+          # .nojekyll makes Pages serve the branch as pure static files. If your
+          # Hugo pipeline wipes unknown files, it must preserve this file.
+          touch pages-repo/.nojekyll
 
       - name: Commit and push
         run: |

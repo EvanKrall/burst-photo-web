@@ -45,8 +45,9 @@ check('gamma lifts mid-gray into display range', Gg > 95, `gray=${Gg} (linear wo
 check('neutral gray stays neutral under unit WB', Math.abs(Rg - Gg) <= 2 && Math.abs(Bg - Gg) <= 2, `rgb(${Rg},${Gg},${Bg})`);
 
 // ---- neutral scene with uneven camera sensitivity: the reason WB exists ----
-// White surface; camera sensitivity implied by WB (2.1, 1, 1.9): R = 64+s/2.1, B = 64+s/1.9.
-const whiteSurface = mkScene(meta.cfa, Math.round(64 + 236 / 2.1), 300, Math.round(64 + 236 / 1.9));
+// White surface under a camera whose sensitivity implies WB (2.1, 1, 1.9):
+// signals above black must be s/2.1, s, s/1.9 so that signal × WB-gain equalizes.
+const whiteSurface = mkScene(meta.cfa, Math.round(236 / 2.1), 236, Math.round(236 / 1.9));
 const noWb = renderPreview(whiteSurface, { ...meta, whiteBalance: null });
 const [Rn, Gn, Bn] = [noWb.rgba[0], noWb.rgba[1], noWb.rgba[2]];
 check('neutral scene without WB: G dominates (camera-native, looks green)', Gn > Rn * 1.3 && Gn > Bn * 1.3,

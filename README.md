@@ -47,6 +47,12 @@ Open http://localhost:8080 in a WebGPU-capable browser (Chrome/Edge 113+,
 Safari 26, Firefox with WebGPU). Drop ≥2 DNGs from the same burst, press
 *Process burst*, get a preview and a 16-bit uncompressed Bayer DNG.
 
+The preview is a fast 2×2-block CFA→RGB render (nearest-neighbour "half-size"
+demosaic) with as-shot white balance and 2.2 gamma applied — enough to judge
+the merge. The downloaded DNG remains undeveloped RAW: full development
+(demosaic, color matrix, tone curve) belongs to your RAW converter, exactly
+like Burst Photo's output.
+
 A local flashraw install is the reliable path: its `.wasm` binaries are
 `new URL(..., import.meta.url)` assets, which the bundled `server.mjs` serves
 with the correct MIME type from `node_modules/`. CDN imports (jsDelivr/esm.sh)

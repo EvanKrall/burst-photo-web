@@ -139,7 +139,7 @@ processBtn.addEventListener('click', async () => {
 
     resultEl.style.display = 'block';
     setProgress(1, 'done');
-    log('Done. Preview shows a fast 2x2-block render; download the DNG for full quality.');
+    log('Done. Preview is a fast 2x2-block render with white balance + gamma; download the DNG for full quality.');
   } catch (err) {
     log(`ERROR: ${err.message}`);
     console.error(err);

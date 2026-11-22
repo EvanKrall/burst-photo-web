@@ -183,9 +183,12 @@ kernels.
    (correct but slower; costs ~25× full-tile evaluations per level).
 4. No hot-pixel suppression, no exposure correction, no bracketing.
 5. Out-of-bounds reads clamp to edge (Metal returns 0) — border pixels only.
-6. Output DNG is a minimal phone-style single-IFD Bayer DNG: preserves
-   resolution/bit-depth/CFA/black/white level/color matrix, but not lens
-   profiles, opcodes, or full EXIF.
+6. Output DNG is a minimal phone-style single-IFD Bayer DNG: resolution,
+   bit-depth, CFA, black/white level, color matrix, AsShotNeutral, orientation,
+   and an EXIF sub-IFD with burst-adjusted capture parameters (ExposureTime =
+   total integration time over the burst; ISO = reference ISO / shot count —
+   the Google HDR+ convention) plus Make/Model/Software/DateTime. Not copied:
+   lens-correction opcodes, lens profiles, full EXIF/maker notes.
 
 ## Next steps
 

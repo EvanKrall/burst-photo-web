@@ -131,9 +131,9 @@ const bursts = {
   'c_identical.dng': mkPixels(),
   'd_subject.dng': mkSubjectDNG(),
 };
-const dngBase64 = Object.fromEntries(Object.entries(bursts).map(([name, pixels]) => [
+const dngBase64 = Object.fromEntries(await Promise.all(Object.entries(bursts).map(async ([name, pixels]) => [
   name, Buffer.from(await writeDNG(pixels, dngOptions, { thumbnail: null })).toString('base64'),
-]));
+])));
 
 const pageErrors = [];
 try {
@@ -143,8 +143,10 @@ try {
   await page.setViewport({ width: 1280, height: 900 });
   await page.goto(`http://localhost:${port}/`, { waitUntil: 'load' });
 
-  // inject the synthetic burst through the file input
+  // inject the synthetic burst through the file input (with auto-download off —
+  // the default-on setting would otherwise save two DNGs to ~/Downloads here)
   await page.evaluate((files) => {
+    document.getElementById('autoDownload').checked = false;
     const toBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     const dt = new DataTransfer();
     for (const [name, b64] of Object.entries(files)) {

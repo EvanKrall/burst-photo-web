@@ -29,6 +29,20 @@ const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const downloadLink = document.getElementById('download');
 
+// Programmatic "save to Downloads": click a temp anchor with the blob URL. The URL
+// is revoked a minute later — immediately would risk cancelling the download, and
+// leaks of one URL per merge are harmless compared to the DNGs themselves.
+function autoDownloadDng(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 function log(msg) {
   logEl.textContent += msg + '\n';
   logEl.scrollTop = logEl.scrollHeight;
@@ -485,9 +499,11 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
     recordTiming('dng', performance.now() - tDng);
     log(`DNG written in ${(performance.now() - tDng).toFixed(0)} ms (${(dngBytes.length / 1e6).toFixed(1)} MB)`);
     const blob = new Blob([dngBytes], { type: 'image/x-adobe-dng' });
+    const filename = refMeta.name.replace(/\.dng$/i, '') + '_merged_web.dng';
     downloadLink.href = URL.createObjectURL(blob);
-    downloadLink.download = refMeta.name.replace(/\.dng$/i, '') + '_merged_web.dng';
+    downloadLink.download = filename;
     downloadLink.classList.remove('disabled');
+    if (autoDownload.checked) autoDownloadDng(blob, filename);
 
     // hand the result to the inspection view (extra "Merged" tab) or finish on the intro
     // panel. The developed RGB preview is no longer rendered here: the Merged view
@@ -515,11 +531,11 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
       showPane('inspector'); // pane must be visible before the UI measures its canvas area
       inspector.setMerged(payload);
       setProgress(stageProgress('preview', 1), 'done');
-      log(`Merged result added to the inspector as the "Merged" view (${(payload.wallMs / 1000).toFixed(2)} s wall) — download the DNG from there.`);
+      log(`Merged result added to the inspector as the "Merged" view (${(payload.wallMs / 1000).toFixed(2)} s wall)${autoDownload.checked ? ' — DNG saved to your downloads' : ' — download the DNG from there'}.`);
     } else {
       showPane('intro');
       setProgress(stageProgress('preview', 1), 'done');
-      log(`Done in ${((performance.now() - tAll) / 1000).toFixed(2)} s (wall) — "Download merged.dng" in the panel on the left.`);
+      log(`Done in ${((performance.now() - tAll) / 1000).toFixed(2)} s (wall)${autoDownload.checked ? ' — merged DNG saved to your downloads' : ' — "Download merged.dng" in the panel on the left'}.`);
     }
     return payload;
   } catch (err) {
@@ -548,11 +564,11 @@ function updateProcessBtn() {
 }
 
 // ---- persisted settings ----
-// The five user-facing controls survive a page refresh: every change is written
+// The six user-facing controls survive a page refresh: every change is written
 // to localStorage and the saved values are restored at startup (falling back to
 // the HTML defaults on the first visit or when the entry is corrupted).
 const SETTINGS_KEY = 'burst-photo-web-settings-v1';
-const SETTING_IDS = ['mergeAlgorithm', 'noiseReduction', 'tileSize', 'searchDistance', 'inspectFirst'];
+const SETTING_IDS = ['mergeAlgorithm', 'noiseReduction', 'tileSize', 'searchDistance', 'inspectFirst', 'autoDownload'];
 
 function loadSettings() {
   let saved;
@@ -594,6 +610,9 @@ for (const id of ['noiseReduction', 'tileSize', 'searchDistance', 'mergeAlgorith
     updateProcessBtn();
   });
 }
-// "Inspect alignment first" only affects the flow, not the result, so it
-// persists without marking the current output stale.
-document.getElementById('inspectFirst').addEventListener('change', saveSettings);
+// "Inspect alignment first" and "Auto-download when done" only affect the flow,
+// not the result, so they persist without marking the current output stale.
+const autoDownload = document.getElementById('autoDownload');
+for (const id of ['inspectFirst', 'autoDownload']) {
+  document.getElementById(id).addEventListener('change', saveSettings);
+}

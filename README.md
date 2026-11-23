@@ -103,9 +103,11 @@ per-frame scoring (mean brightness-matched difference and alignment-field
 variation inside a draggable subject area). Uncheck bad frames, then press
 *Merge* — the pipeline runs on the checked frames only (reusing the
 inspection alignment) and the result appears as a developed RGB **Merged**
-view plus a 16-bit uncompressed Bayer DNG to download. Uncheck the box to
-merge automatically instead; *Process burst* re-runs with the current
-selection.
+view plus a 16-bit uncompressed Bayer DNG to download. With **Auto-download
+when done** checked (the default) the merged DNG is saved to your downloads
+folder as soon as the merge finishes — the browser may ask permission for
+automatic downloads on repeat merges. Uncheck the box to merge automatically
+instead; *Process burst* re-runs with the current selection.
 
 The inspector's controls mirror the Swift app: click sets an **anchor point**
 (alignment/flow views show the field relative to it, difference fits

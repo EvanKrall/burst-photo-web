@@ -466,6 +466,7 @@ export class InspectorUI {
     // keyboard navigation (only while the inspector is visible and no text input has focus)
     this.keyHandler = (e) => {
       if (this.el.pane.hidden) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return; // browser/OS shortcuts: Cmd-R reload, Cmd-W, …
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
       if (e.key === 'Escape') {

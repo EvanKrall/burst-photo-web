@@ -141,21 +141,55 @@ try {
   // uncaught page exceptions only — console resource 404s (vendored flashraw fallback) are expected in dev
   page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 300)));
   await page.setViewport({ width: 1280, height: 900 });
-  await page.goto(`http://localhost:${port}/`, { waitUntil: 'load' });
 
   // inject the synthetic burst through the file input (with auto-download off —
-  // the default-on setting would otherwise save two DNGs to ~/Downloads here)
-  await page.evaluate((files) => {
-    document.getElementById('autoDownload').checked = false;
-    const toBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    const dt = new DataTransfer();
-    for (const [name, b64] of Object.entries(files)) {
-      dt.items.add(new File([toBytes(b64)], name, { type: 'image/x-adobe-dng' }));
-    }
-    const input = document.getElementById('fileInput');
-    input.files = dt.files;
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  }, dngBase64);
+  // the default-on setting would otherwise save DNGs to ~/Downloads here); a fresh
+  // page.goto each call also resets all app state and the log between passes
+  const loadBurst = async () => {
+    await page.goto(`http://localhost:${port}/`, { waitUntil: 'load' });
+    await page.evaluate((files) => {
+      document.getElementById('autoDownload').checked = false;
+      const toBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      for (const [name, b64] of Object.entries(files)) {
+        dt.items.add(new File([toBytes(b64)], name, { type: 'image/x-adobe-dng' }));
+      }
+      const input = document.getElementById('fileInput');
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }, dngBase64);
+  };
+
+  // ---- pass 1: default flow — "Inspect alignment first" unchecked → auto-merge ----
+  // the burst is still aligned and the alignment view still comes up, but the merge
+  // ("Merge 4 of 4 images") starts automatically the moment alignment is done
+  await loadBurst();
+  await page.waitForFunction(() => {
+    const b = document.querySelector('#inspModes button[data-mode="merged"]');
+    return b && !b.hidden && b.classList.contains('active') && !document.getElementById('inspectorPane').hidden;
+  }, { timeout: 120000 });
+  const auto = await page.evaluate(() => {
+    const text = document.getElementById('log').textContent;
+    return {
+      autoMergeLogged: text.includes('Auto-merge: running "Merge 4 of 4 images" now.'),
+      reuse: text.includes('reusing the inspection alignment'),
+      warpStages: (text.match(/warp\+merge \d+\//g) || []).length,
+      alignStages: (text.match(/align\+merge \d+\//g) || []).length,
+      rows: document.querySelectorAll('.insp-row').length,
+      downloadShown: !document.getElementById('inspDownloadDng').hidden,
+    };
+  });
+  check('auto-merge: the merge starts automatically after alignment', auto.autoMergeLogged);
+  check('auto-merge reuses the inspection alignment (warp stages, no align stages)',
+    auto.reuse && auto.warpStages >= 1 && auto.alignStages === 0, JSON.stringify(auto));
+  check('auto-merge returns to the inspector with the Merged view + Download DNG',
+    auto.downloadShown && auto.rows === 4, JSON.stringify(auto));
+
+  // ---- pass 2: manual inspection — "Inspect alignment first" checked ----
+  // persist the flag through the app's own settings storage and start from a clean page
+  await page.evaluate(() =>
+    localStorage.setItem('burst-photo-web-settings-v1', JSON.stringify({ inspectFirst: true })));
+  await loadBurst();
 
   // wait for the inspector pane to become visible
   await page.waitForSelector('#inspectorPane:not([hidden])', { timeout: 60000 });

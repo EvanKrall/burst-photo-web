@@ -1,10 +1,11 @@
 // UI orchestration: file loading, flashraw decode, WebGPU pipeline, preview + DNG output.
 //
-// Flow: drop → decode → (optionally) the alignment inspector (src/inspector.js) → merge.
-// With "Inspect alignment first" checked (default), the burst is aligned without merging
-// (src/inspect.js) and the inspector lets the user review every frame's alignment, score
-// them inside a subject area and exclude bad frames; the merge runs on the frames that
-// remain checked when Merge is pressed.
+// Flow: drop → decode → the alignment inspector (src/inspector.js) → merge. The burst is
+// always aligned without merging first (src/inspect.js): with "Inspect alignment first"
+// checked the inspector lets the user review every frame's alignment, score them inside
+// a subject area and exclude bad frames, merging the frames that remain checked when
+// Merge is pressed; unchecked (default) it starts that merge automatically the moment
+// alignment is done.
 
 import { initGPU, GPUContext } from './gpu.js';
 import { WGSL } from './kernels.js';
@@ -227,14 +228,13 @@ async function loadFiles(fileList) {
   } finally {
     decoding = false;
   }
-  // With inspection enabled (default): align the burst and let the user review the frames
-  // before merging. Otherwise run the pipeline right away; the "Process burst" button stays
-  // enabled afterwards for reprocessing with different settings.
-  if (inspectFirst.checked) {
-    await runInspection();
-  } else {
-    await processBurst();
-  }
+  // With "Inspect alignment first" checked: align the burst and let the user review the
+  // frames before merging. Unchecked (default): the alignment view still comes up — but
+  // the merge starts automatically the moment alignment is done (runInspection's
+  // autoMerge), so the user only ever sees the merged result (plus the inspector views
+  // behind it). Either way the "Process burst" button stays enabled afterwards for
+  // reprocessing with different settings.
+  await runInspection(null, null, !inspectFirst.checked);
 }
 
 const yieldToUI = () => new Promise((r) => setTimeout(r, 0));
@@ -281,7 +281,9 @@ let inspectionReuse = null;
 // refIdxOverride: designate a specific frame as the reference ("Make reference" action);
 // defaults to the burst center. carried: user decisions from a previous inspection view
 // (exclusions, subject area, anchor, controls) to restore in the rebuilt view.
-async function runInspection(refIdxOverride = null, carried = null) {
+// autoMerge: start merging all frames as soon as alignment finishes ("Inspect alignment
+// first" unchecked) — the view still comes up; the merged result is added to it.
+async function runInspection(refIdxOverride = null, carried = null, autoMerge = false) {
   if (decoding || processing || loadedFrames.length < 2) return;
   setProgress(0, 'aligning…');
   const refIdx = Number.isInteger(refIdxOverride)
@@ -334,15 +336,17 @@ async function runInspection(refIdxOverride = null, carried = null) {
       return { refCaptureIdx: options.refIdx, grids };
     };
     inspectionReuse = alignmentReuse; // also used by the "Process burst" button
+    // The inspector's Merge button and the auto-merge share this path: reuse the
+    // inspection alignment, and — the inspection view STAYS ALIVE — keep its grids
+    // enabling alignment reuse on re-merges, handing the merged result back as an
+    // extra "Merged" view instead of replacing the whole inspection.
+    const mergeIncluded = (includedIndices) => {
+      const reuse = alignmentReuse();
+      showPane('progress');
+      return processBurst(includedIndices, { reuse, returnToInspector: true });
+    };
     inspector = new InspectorUI(session, {
-      onMerge: async (includedIndices) => {
-        const reuse = alignmentReuse();
-        // the inspection view STAYS ALIVE: its grids keep enabling alignment reuse on
-        // re-merges, and the merged result is handed back as an extra "Merged" view
-        // instead of replacing the whole inspection
-        showPane('progress');
-        await processBurst(includedIndices, { reuse, returnToInspector: true });
-      },
+      onMerge: (includedIndices) => mergeIncluded(includedIndices),
       // "Make reference" re-aligns the burst against the chosen frame and rebuilds
       // this view with the user's decisions carried over
       onReferenceChange: (idx) => redesignateReference(idx),
@@ -352,11 +356,14 @@ async function runInspection(refIdxOverride = null, carried = null) {
     // apply the AF area (if any) as the subject area — by now it has usually finished
     // downloading/running alongside the alignment. On a "Make reference" re-inspection
     // the subject area was carried over, so there is nothing to apply or report.
-    if (!carried?.roi) {
+    const applyAfArea = async () => {
+      if (carried?.roi) return;
       const { roi: afRoi, error: afError } = await afRoiPromise;
+      const view = inspector; // may have been disposed/rebuilt while detection ran
+      if (!view) return;
       if (afRoi) {
         const pct = (v) => Math.round(v * 100);
-        if (inspector.applyAfAreaRoi(afRoi)) {
+        if (view.applyAfAreaRoi(afRoi)) {
           log(`AF area from ${refFile.name} maker notes: x ${pct(afRoi.x0)}-${pct(afRoi.x1)}%, y ${pct(afRoi.y0)}-${pct(afRoi.y1)}% — using it as the subject area.`);
         } else {
           log(`AF area found, but you already set a subject area — keeping yours.`);
@@ -366,8 +373,19 @@ async function runInspection(refIdxOverride = null, carried = null) {
       } else {
         log(`No AF area metadata in the reference frame (currently decoded for Nikon Z bodies) — subject area defaults to the centered half.`);
       }
+    };
+    if (autoMerge) {
+      // fire off the merge without holding it up for AF-area detection: the subject
+      // area only guides the inspector's scores/overlay, not the merge — the result
+      // is applied to the view whenever detection finishes.
+      applyAfArea();
+      const included = inspector.includedFrames(); // nothing excluded yet: all frames
+      log(`Auto-merge: running "Merge ${included.length} of ${loadedFrames.length} images" now.`);
+      mergeIncluded(included.map((f) => f.idx));
+    } else {
+      await applyAfArea();
+      log('Merge the checked frames with the button in the inspector (or "Process burst" with all frames).');
     }
-    log('Merge the checked frames with the button in the inspector (or "Process burst" with all frames).');
   } catch (err) {
     log(`ERROR: ${err.message}`);
     console.error(err);

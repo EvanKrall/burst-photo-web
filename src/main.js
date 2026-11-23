@@ -468,7 +468,7 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
     };
     if (totalExposure) log(`metadata: exposure ${totalExposure.toFixed(3)} s (Σ ${n} frames), ISO ≈ ${Math.round(exif.iso)} (ref ${refIso} / ${n})`);
     const tDng = performance.now();
-    const dngBytes = writeDNG(result.pixels, {
+    const dngBytes = await writeDNG(result.pixels, {
       width: result.width,
       height: result.height,
       blackLevel: refMeta.blackLevel,

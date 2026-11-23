@@ -132,7 +132,7 @@ const bursts = {
   'd_subject.dng': mkSubjectDNG(),
 };
 const dngBase64 = Object.fromEntries(Object.entries(bursts).map(([name, pixels]) => [
-  name, Buffer.from(writeDNG(pixels, dngOptions)).toString('base64'),
+  name, Buffer.from(await writeDNG(pixels, dngOptions, { thumbnail: null })).toString('base64'),
 ]));
 
 const pageErrors = [];

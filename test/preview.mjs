@@ -1,8 +1,8 @@
-// Preview renderer checks: CFA→RGB correctness, white-balance gain, gamma lift.
-// Plus: end-to-end flashraw development of our own merged DNG output.
+// Thumbnail + flashraw develop checks: our merged DNG's embedded thumbnail (what
+// macOS Finder uses for file icons) is developed through the same flashraw chain
+// as the in-app views, and the DNG itself develops to a correct image.
 // Run: node test/preview.mjs
 
-import { renderPreview } from '../src/preview.js';
 import { writeDNG } from '../src/dng_writer.js';
 import { FlashRaw } from 'flashraw';
 
@@ -34,43 +34,39 @@ const meta = {
   cfa: [0, 1, 1, 2], whiteBalance: [2.1, 1, 1.9, 1],
 };
 
-// ---- red scene, RGGB: output must be strongly red-dominant after WB ----
-const p1 = renderPreview(mkScene(meta.cfa, 400, 100, 60), meta);
-check('preview dimensions', p1.width === W / 2 && p1.height === H / 2, `${p1.width}x${p1.height}`);
-const [R1, G1, B1] = [p1.rgba[0], p1.rgba[1], p1.rgba[2]];
-check('red scene renders red-dominant', R1 > G1 * 1.8 && R1 > B1 * 1.8, `rgb(${R1},${G1},${B1})`);
-check('red scene is bright after WB+gamma', R1 > 180, `R=${R1}`);
+// ---- end-to-end: red scene merged Bayer → DNG (with embedded thumbnail) ----
+const dngBytes = await writeDNG(mkScene(meta.cfa, 400, 100, 60), meta);
 
-// ---- linear mid-gray without gamma would be ~46; with gamma ~119 ----
-const gray = renderPreview(mkScene(meta.cfa, 180, 180, 180), { ...meta, whiteBalance: [1, 1, 1, 1] });
-const [Rg, Gg, Bg] = [gray.rgba[0], gray.rgba[1], gray.rgba[2]];
-check('gamma lifts mid-gray into display range', Gg > 95, `gray=${Gg} (linear would be ≈ 46)`);
-check('neutral gray stays neutral under unit WB', Math.abs(Rg - Gg) <= 2 && Math.abs(Bg - Gg) <= 2, `rgb(${Rg},${Gg},${Bg})`);
-
-// ---- neutral scene with uneven camera sensitivity: the reason WB exists ----
-// White surface under a camera whose sensitivity implies WB (2.1, 1, 1.9):
-// signals above black must be s/2.1, s, s/1.9 so that signal × WB-gain equalizes.
-const whiteSurface = mkScene(meta.cfa, Math.round(236 / 2.1), 236, Math.round(236 / 1.9));
-const noWb = renderPreview(whiteSurface, { ...meta, whiteBalance: null });
-const [Rn, Gn, Bn] = [noWb.rgba[0], noWb.rgba[1], noWb.rgba[2]];
-check('neutral scene without WB: G dominates (camera-native, looks green)', Gn > Rn * 1.3 && Gn > Bn * 1.3,
-  `rgb(${Rn},${Gn},${Bn})`);
-const withWb = renderPreview(whiteSurface, meta);
-const [Rw, Gw, Bw] = [withWb.rgba[0], withWb.rgba[1], withWb.rgba[2]];
-check('same scene with as-shot WB: near-neutral', Math.abs(Rw - Gw) <= 12 && Math.abs(Bw - Gw) <= 12,
-  `rgb(${Rw},${Gw},${Bw})`);
-
-// ---- BGGR CFA: red signal lives in slot 3; renderer must follow the CFA, not assume RGGB ----
-const bggr = renderPreview(mkScene([2, 1, 1, 0], 400, 100, 60), { ...meta, cfa: [2, 1, 1, 0] });
-const [R4, G4, B4] = [bggr.rgba[0], bggr.rgba[1], bggr.rgba[2]];
-check('BGGR CFA mapped correctly (slot 3 is R, slot 0 is B)', R4 > 180 && B4 < R4 / 1.8, `rgb(${R4},${G4},${B4})`);
-
-// ---- alpha opaque ----
-check('alpha = 255', p1.rgba[3] === 255);
+// ---- embedded thumbnail: IFD0 is a reduced-resolution RGB image (DNG spec),
+// developed through the flashraw chain — this is what macOS Finder shows ----
+const dv = new DataView(dngBytes.buffer, dngBytes.byteOffset, dngBytes.byteLength);
+const ifdOff = dv.getUint32(4, true);
+const tags = new Map();
+const nEntries = dv.getUint16(ifdOff, true);
+for (let i = 0; i < nEntries; i++) {
+  const e = ifdOff + 2 + i * 12;
+  tags.set(dv.getUint16(e, true), { type: dv.getUint16(e + 2, true), count: dv.getUint32(e + 4, true), value: dv.getUint32(e + 8, true) });
+}
+const tw = tags.get(256).value, th = tags.get(257).value;
+check('thumbnail NewSubfileType (254=1)', tags.get(254)?.value === 1);
+check('thumbnail photometric RGB (262=2)', tags.get(262)?.value === 2);
+check('thumbnail dims ≤ 256 px', tw <= 256 && th <= 256, `${tw}x${th}`);
+check('thumbnail byte count = W*H*3', tags.get(279)?.value === tw * th * 3,
+  `${tags.get(279)?.value} vs ${tw * th * 3}`);
+const thumbOff = tags.get(273).value;
+const tm = [0, 0, 0];
+for (let i = 0; i < tw * th; i++) {
+  tm[0] += dngBytes[thumbOff + i * 3];
+  tm[1] += dngBytes[thumbOff + i * 3 + 1];
+  tm[2] += dngBytes[thumbOff + i * 3 + 2];
+}
+const tn = tw * th;
+const [tr, tg, tb] = [tm[0] / tn, tm[1] / tn, tm[2] / tn];
+check('embedded thumbnail red-dominant (flashraw develop: WB+matrix)', tr > tg * 1.5 && tr > tb * 1.5,
+  `mean rgb(${tr.toFixed(0)},${tg.toFixed(0)},${tb.toFixed(0)})`);
+check('embedded thumbnail bright (sRGB-encoded)', tr > 170, `R=${tr.toFixed(0)}`);
 
 // ---- end-to-end: flashraw develops OUR merged DNG (the browser preview path) ----
-// Red scene merged Bayer → DNG (with AsShotNeutral from WB) → flashraw rgba8.
-const dngBytes = writeDNG(mkScene(meta.cfa, 400, 100, 60), meta);
 const rawDev = await FlashRaw.open(dngBytes);
 try {
   const asShot = rawDev.metadata.dng?.asShotNeutral;

@@ -39,7 +39,7 @@ const small = new Uint16Array(crop.w * crop.h);
 for (let y = 0; y < crop.h; y++) {
   for (let x = 0; x < crop.w; x++) small[y * crop.w + x] = frame.data[y * frame.width + x];
 }
-const dngBytes = writeDNG(small, {
+const dngBytes = await writeDNG(small, {
   width: crop.w, height: crop.h,
   blackLevel: frame.blackLevel, whiteLevel: frame.whiteLevel,
   cfa: frame.cfa, colorMatrix: frame.colorMatrix,

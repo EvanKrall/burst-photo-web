@@ -23,7 +23,7 @@ for (let y = 0; y < H; y++) {
   }
 }
 
-const dng = writeDNG(pixels, {
+const dng = await writeDNG(pixels, {
   width: W,
   height: H,
   blackLevel: BLACK,
@@ -50,21 +50,48 @@ const check = (label, ok, detail = '') => {
   if (!ok) failures++;
 };
 
-// ---- structure sanity: parse the TIFF IFD back ----
+// ---- structure sanity: parse the TIFF IFDs back ----
 const dv = new DataView(dng.buffer, dng.byteOffset, dng.byteLength);
+const parseIfd = (off) => {
+  const tags = new Map();
+  const n = dv.getUint16(off, true);
+  for (let i = 0; i < n; i++) {
+    const e = off + 2 + i * 12;
+    tags.set(dv.getUint16(e, true), { type: dv.getUint16(e + 2, true), count: dv.getUint32(e + 4, true), value: dv.getUint32(e + 8, true) });
+  }
+  return tags;
+};
 check('TIFF magic II*', dv.getUint16(0, true) === 0x4949 && dv.getUint16(2, true) === 42);
 const ifdOff = dv.getUint32(4, true);
-const nEntries = dv.getUint16(ifdOff, true);
-check('IFD entry count', nEntries >= 20, `${nEntries} entries`);
-const tags = new Map();
-for (let i = 0; i < nEntries; i++) {
-  const e = ifdOff + 2 + i * 12;
-  tags.set(dv.getUint16(e, true), { type: dv.getUint16(e + 2, true), count: dv.getUint32(e + 4, true), value: dv.getUint32(e + 8, true) });
+const tags = parseIfd(ifdOff);
+check('IFD0 entry count', tags.size >= 15, `${tags.size} entries`);
+
+// IFD0 is the thumbnail (DNG spec): reduced-resolution uncompressed RGB
+check('thumbnail NewSubfileType (254=1)', tags.get(254)?.value === 1);
+check('thumbnail photometric RGB (262=2)', tags.get(262)?.value === 2);
+check('thumbnail samples (277=3)', tags.get(277)?.value === 3);
+const thumbW = tags.get(256).value, thumbH = tags.get(257).value;
+check('thumbnail ≤ 256 px', thumbW <= 256 && thumbH <= 256, `${thumbW}x${thumbH}`);
+check('thumbnail byte count = W*H*3', tags.get(279)?.value === thumbW * thumbH * 3,
+  `${tags.get(279)?.value} vs ${thumbW * thumbH * 3}`);
+const thumbOff = tags.get(273).value;
+let thumbNonBlack = 0;
+for (let i = 0; i < thumbW * thumbH; i++) {
+  if (dng[thumbOff + i * 3] > 8 || dng[thumbOff + i * 3 + 1] > 8 || dng[thumbOff + i * 3 + 2] > 8) thumbNonBlack++;
 }
-check('CFA photometric (262=32803)', tags.get(262)?.value === 32803);
-check('bits per sample (258=16)', tags.get(258)?.value === 16);
-check('orientation (274=1)', tags.get(274)?.value === 1);
-check('CFAPattern (33422)', tags.get(33422)?.count === 4);
+check('thumbnail shows the gradient (non-black pixels)', thumbNonBlack > thumbW * thumbH * 0.3,
+  `${thumbNonBlack}/${thumbW * thumbH} non-black`);
+
+check('SubIFDs pointer present (330)', tags.has(330));
+const rawOff = tags.get(330).value;
+const rawTags = parseIfd(rawOff);
+check('raw SubIFD: CFA photometric (262=32803)', rawTags.get(262)?.value === 32803);
+check('raw SubIFD: bits per sample (258=16)', rawTags.get(258)?.value === 16);
+check('raw SubIFD: full resolution (254=0)', rawTags.get(254)?.value === 0);
+check('raw SubIFD: CFAPattern (33422)', rawTags.get(33422)?.count === 4);
+check('raw dimensions match', rawTags.get(256)?.value === W && rawTags.get(257)?.value === H,
+  `${rawTags.get(256)?.value}x${rawTags.get(257)?.value}`);
+check('orientation (274=1) in both IFDs', tags.get(274)?.value === 1 && rawTags.get(274)?.value === 1);
 check('DNGVersion (50706)', tags.get(50706)?.count === 4);
 check('Make/Model tags present', tags.has(271) && tags.has(272));
 check('Software tag (305)', tags.has(305));
@@ -73,13 +100,8 @@ check('DateTime tag (306)', tags.has(306));
 // ---- EXIF sub-IFD: parse it back and verify burst-adjusted values ----
 check('ExifIFDPointer present (34665)', tags.has(34665));
 const exifOff = tags.get(34665).value;
-const nExif = dv.getUint16(exifOff, true);
-check('EXIF IFD entry count', nExif >= 5, `${nExif} entries`);
-const exifTags = new Map();
-for (let i = 0; i < nExif; i++) {
-  const e = exifOff + 2 + i * 12;
-  exifTags.set(dv.getUint16(e, true), { type: dv.getUint16(e + 2, true), count: dv.getUint32(e + 4, true), value: dv.getUint32(e + 8, true) });
-}
+const exifTags = parseIfd(exifOff);
+check('EXIF IFD entry count', exifTags.size >= 5, `${exifTags.size} entries`);
 const readRational = (tag) => {
   const t = exifTags.get(tag);
   if (!t || t.type !== 5) return null;

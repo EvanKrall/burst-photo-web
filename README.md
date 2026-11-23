@@ -136,11 +136,10 @@ the same bytes you download — so the Merged view shows exactly what a RAW
 converter will see: full-resolution bilinear demosaic, as-shot white balance,
 camera color matrix, sRGB encoding and orientation. The same development
 chain renders the Original/Warped/Reference photo views from each frame's
-Bayer data. (Earlier iterations used a hand-rolled 2×2-block render or gray
-tonemaps; the block render survives in `src/preview.js` as a fallback.) The
-merged DNG carries `AsShotNeutral` derived from the camera's as-shot
-multipliers, so converters reproduce the camera's white balance instead of
-guessing.
+Bayer data, and also develops the DNG's embedded thumbnail (what macOS
+Finder shows for file icons). The merged DNG carries `AsShotNeutral` derived
+from the camera's as-shot multipliers, so converters reproduce the camera's
+white balance instead of guessing.
 
 Note the division of labor: HDR+ *must* align and merge on the raw mosaic
 (pre-demosaic temporal denoising is the whole point of the algorithm), but
@@ -376,12 +375,17 @@ for scoring.
    workgroups, so every kernel guards its invocations against the intended
    grid (without the guards, extra invocations corrupt neighboring rows' —
    discovered by the inspector's tile-cost readbacks).
-6. Output DNG is a minimal phone-style single-IFD Bayer DNG: resolution,
+6. Output DNG is a minimal phone-style Bayer DNG: IFD0 carries a ≤256 px
+   uncompressed RGB thumbnail developed through the same flashraw chain as the
+   in-app views (demosaic, as-shot WB, color matrix, sRGB — so the icon matches
+   Quick Look; macOS Finder uses it for file icons, and without it the icons
+   come out black). The full-resolution raw lives in a SubIFD with resolution,
    bit-depth, CFA, black/white level, color matrix, AsShotNeutral, orientation,
-   and an EXIF sub-IFD with burst-adjusted capture parameters (ExposureTime =
-   total integration time over the burst; ISO = reference ISO / shot count —
-   the Google HDR+ convention) plus Make/Model/Software/DateTime. Not copied:
-   lens-correction opcodes, lens profiles, full EXIF/maker notes.
+   and IFD0 also points to an EXIF sub-IFD
+   with burst-adjusted capture parameters (ExposureTime = total integration time
+   over the burst; ISO = reference ISO / shot count — the Google HDR+
+   convention) plus Make/Model/Software/DateTime. Not copied: lens-correction
+   opcodes, lens profiles, full EXIF/maker notes.
 
 ## Next steps
 

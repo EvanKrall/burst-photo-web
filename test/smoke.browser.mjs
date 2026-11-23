@@ -263,7 +263,7 @@ try {
       // spread), cached per output size and across selected frames
       session8.mergedResult = {
         pixels: r8reuse.pixels, width: r8reuse.width, height: r8reuse.height,
-        dngBytes: writeDNG(r8reuse.pixels, {
+        dngBytes: await writeDNG(r8reuse.pixels, {
           width: r8reuse.width, height: r8reuse.height, blackLevel: BLACK, whiteLevel: WHITE,
           cfa: [0, 1, 1, 2], colorMatrix: [0.9505, 0, -0.0006, 0.3181, 0.7288, 0.0248, 0.0447, -0.0178, 0.9622],
           whiteBalance: [2.1, 1, 1.9, 1], orientation: 1, make: 'TestCam', model: 'PoC-1',

@@ -127,16 +127,18 @@ export async function decodeRaw(arrayBuffer, name = 'frame') {
  * decodeRaw-style record whose fields double as the writeDNG metadata (width, height,
  * data, blackLevel, whiteLevel, cfa, colorMatrix, whiteBalance, …). This is how the
  * inspector renders its photo views (Original/Warped/Reference/Merged) as true RGB.
+ * The temp DNG skips the embedded thumbnail ({ thumbnail: null }) — it exists only
+ * to be developed, and writeDNG's own thumbnail path develops through this module.
  */
 export async function developBayer(frame, { demosaic = 'bilinear' } = {}) {
-  const dng = writeDNG(frame.data, frame);
+  const dng = await writeDNG(frame.data, frame, { thumbnail: null });
   return developPreview(dng, { demosaic });
 }
 
 // Fully develop a DNG (e.g. our own merged output) with flashraw and return display-ready
 // RGBA. This gives the preview the whole development chain — demosaic, white balance,
-// color matrix, sRGB encoding, orientation — instead of the crude block render in
-// preview.js. `demosaic: 'half-size'` (2×2 block per channel) keeps it fast.
+// color matrix, sRGB encoding, orientation. `demosaic: 'half-size'` (2×2 block per
+// channel) keeps it fast. Also used by dng_writer.js to develop the embedded thumbnail.
 export async function developPreview(dngBytes, { demosaic = 'half-size' } = {}) {
   const { FlashRaw } = await loadFlashraw();
   const raw = await FlashRaw.open(dngBytes);

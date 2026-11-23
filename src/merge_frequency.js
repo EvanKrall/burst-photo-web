@@ -93,7 +93,7 @@ function placeF32(gpu, src, outW, outH, ox, oy) {
   const out = new Plane(gpu.zeros(`place-${ox},${oy}`, outW * outH * 4), outW, outH);
   gpu.dispatch('place_f32',
     [{ buffer: src.buf }, { buffer: out.buf },
-     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [src.w, src.h, outW, ox, oy]) }],
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32'], [src.w, src.h, outW, outH, ox, oy]) }],
     groups(outW, outH));
   return out;
 }

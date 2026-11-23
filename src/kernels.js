@@ -629,8 +629,8 @@ const PI: f32 = 3.14159265358979;
 // preparing each frame with asymmetric padding (prepare_texture pad_left/right/top/
 // bottom). Keeping the alignment warp on the shared alignment padding instead means
 // inspection alignment grids stay bit-identical and are reused as-is.
-// Params: src_w, src_h, out_w, ox, oy (out_h = dispatch rows)
-struct PlaceParams { src_w: i32, src_h: i32, out_w: i32, ox: i32, oy: i32, };
+// Params: src_w, src_h, out_w, out_h, ox, oy
+struct PlaceParams { src_w: i32, src_h: i32, out_w: i32, out_h: i32, ox: i32, oy: i32, };
 @group(0) @binding(0) var<storage, read>       place_in:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> place_out: array<f32>;
 @group(0) @binding(2) var<uniform>             place_p:   PlaceParams;
@@ -639,7 +639,7 @@ struct PlaceParams { src_w: i32, src_h: i32, out_w: i32, ox: i32, oy: i32, };
 fn place_f32(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let x = i32(gid3.x);
     let y = i32(gid3.y);
-    if (x >= place_p.out_w || y >= place_p.oy + place_p.src_h) { return; }  // exact-dispatch guard
+    if (x >= place_p.out_w || y >= place_p.out_h) { return; }  // exact-dispatch guard
     let sx = x - place_p.ox;
     let sy = y - place_p.oy;
     if (sx >= 0 && sx < place_p.src_w && sy >= 0 && sy < place_p.src_h) {

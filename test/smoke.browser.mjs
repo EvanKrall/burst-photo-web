@@ -350,7 +350,7 @@ try {
         const canvas = new Plane(gpu.zeros('place-canvas', CW * CH * 4), CW, CH);
         gpu.dispatch('place_f32',
           [{ buffer: srcBuf }, { buffer: canvas.buf },
-           { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [SW, SH, CW, OX, OY]) }],
+           { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32'], [SW, SH, CW, CH, OX, OY]) }],
           [Math.ceil(CW / 8), Math.ceil(CH / 8), 1]);
         const rgbaP = new Plane(gpu.zeros('place-rgba', CW * CH * 4), CW / 2, CH / 2);
         gpu.dispatch('convert_to_rgba',

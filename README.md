@@ -11,9 +11,13 @@ A browser-based proof-of-concept port of [Burst Photo](https://github.com/martin
 
 ## Status
 
-This is a **proof of concept**: Bayer sensors, uniform-exposure bursts,
-spatial-domain merge only, no hot-pixel suppression, no exposure bracketing,
-no frequency-domain merge. See "PoC scope" below.
+This is a **proof of concept**: Bayer sensors, uniform-exposure bursts, no
+hot-pixel suppression, no exposure bracketing. Both of Burst Photo's merging
+algorithms are ported: **Fast** (spatial domain) and **Higher quality**
+(frequency domain — 8×8-merge-tile FFTs with Wiener shrinkage, sub-pixel
+alignment via the Fourier shift theorem, and four displaced tile grids whose
+raised-cosine windows sum to exactly 1). The reference frame can be
+designated freely from the alignment inspector. See "PoC scope" below.
 
 The flashraw integration and the DNG writer are verified headlessly
 (`npm test`: synthetic Bayer frame → DNG → flashraw decode → exact pixel +
@@ -22,7 +26,11 @@ metadata round-trip, 20 checks). The WGSL kernels are verified on a real GPU
 the full pipeline plus the alignment inspection on synthetic bursts on your
 actual GPU — identical frames must round-trip exactly, a (2,1)-shifted
 comparison frame must be motion-rejected, the inspection must recover the
-known shift, and ROI scoring must separate rigid frames from a moved subject).
+known shift, and ROI scoring must separate rigid frames from a moved subject;
+the frequency-domain merge additionally verifies the FFT pair against the
+raised-cosine window, geometry/robustness derivations against the Swift
+formulas, identical-frame exactness, shift tracking, determinism, and
+bit-identical alignment-grid reuse).
 `npm run e2e` additionally drives the real page (decode → inspector → frame
 selection → merge → preview) with a synthetic DNG burst. All suites currently
 pass.
@@ -104,7 +112,14 @@ The inspector's controls mirror the Swift app: click sets an **anchor point**
 brightness locally and robustly around it), drag marks the **subject area**
 (drag a rectangle on the image), the wheel zooms, ↑/↓ scrub frames,
 ←/→ switches modes, space toggles a frame's checkbox, esc clears the
-subject area.
+subject area, and **r** (or the merge bar's *Make reference* button)
+designates the selected frame as the burst's reference — the whole burst is
+re-aligned against it and the inspection view rebuilds with your frame
+selection and subject area carried over. The **Merge algorithm** select in
+the left panel switches between *Fast (spatial)* — Burst Photo's default —
+and *Higher quality (frequency)*, which merges in the frequency domain for
+less noise at the cost of ~9× the merge time (measured on a 10-frame 24 MP
+burst: 1.3 s vs 12 s after inspection).
 
 **Input formats**: everything flashraw decodes — DNG, NEF/NRW, ARW/SR2/SRF/ARQ,
 CR2/CR3/CRW, RAF, RW2/RWL, ORF, PEF, SRW, MRW, IIQ, 3FR/FFF, KDC/DCR/DCS, ERF,
@@ -156,6 +171,10 @@ index.html            UI: drop zone, settings, progress, inspector, download
 src/main.js           orchestration: load → decode → inspection → pipeline → DNG output
 src/raw.js            flashraw wrapper: DNG → {Bayer u16, black/white level, CFA, color matrix}
 src/pipeline.js       port of merge/spatial.swift + align/align.swift orchestration
+src/merge_frequency.js port of merge/frequency.swift ("Higher quality" algorithm):
+                      FFT-based merge over four displaced merge-tile grids; aligns once
+                      on the shared alignment padding and re-places frames into
+                      per-iteration canvases so inspection grids stay reusable
 src/kernels.js        WGSL compute kernels (ports of the Metal kernels)
 src/inspect.js        alignment inspection session (port of inspect/inspect.swift):
                       align-only pass, per-frame alignment grids, on-demand warped/
@@ -207,7 +226,10 @@ skipped entirely (verified bit-identical against a full align+merge) —
 and returns to the inspection view with the result as an extra "Merged"
 view. The session stays alive, so scoring and re-merging with a different
 frame selection costs no new alignment; the DNG downloads straight from
-the merge bar. Changing the tile size / search distance between
+the merge bar. *Make reference* (merge-bar button, or **r** on a selected
+frame) designates a different frame as the reference: the burst is
+re-aligned against it and the view is rebuilt with the frame selection and
+subject area carried over. Changing the tile size / search distance between
 inspection and merge, or excluding the inspection reference, falls back
 to a full re-alignment. A plain "Process burst" without an inspection
 view still aligns from scratch, picks the center of the frame list as its
@@ -267,16 +289,26 @@ Full Metal kernel census of Burst Photo (52 kernels) and their PoC status:
 
 | Kernel | Purpose | PoC |
 |---|---|---|
-| `forward_fft` / `backward_fft` | radix-2 tiled 2D DFT (4 channels packed in RGBA) | ❌ |
-| `forward_dft` / `backward_dft` | generic tiled 2D DFT | ❌ |
-| `merge_frequency_domain` | robust merge per frequency tile + subpixel alignment via Fourier shift theorem | ❌ |
-| `calculate_rms_rgba` | per-tile shot-noise estimate | ❌ |
-| `calculate_mismatch_rgba` | per-tile motion-mismatch estimate | ❌ |
-| `normalize_mismatch` | global mismatch normalization (reduction) | ❌ |
-| `calculate_abs_diff_rgba` | per-tile abs diff helper | ❌ |
-| `calculate_highlights_norm_rgba` | per-tile clipped-highlight weight | ❌ |
-| `deconvolute_frequency_domain` | Wiener-style deconvolution of merged Fourier data | ❌ |
-| `reduce_artifacts_tile_border` | smooths tile-border artifacts of windowed inverse FFT | ❌ |
+| `forward_fft` / `backward_fft` | radix-2 tiled 2D DFT (4 channels packed in RGBA) | ✅ ported |
+| `forward_dft` / `backward_dft` | generic tiled 2D DFT | ❌ unreachable (merge tile pinned to 8×8 = FFT path) |
+| `merge_frequency_domain` | robust merge per frequency tile + subpixel alignment via Fourier shift theorem | ✅ ported |
+| `calculate_rms_rgba` | per-tile shot-noise estimate | ✅ ported |
+| `calculate_mismatch_rgba` | per-tile motion-mismatch estimate | ✅ ported (exposure factor 1) |
+| `normalize_mismatch` | global mismatch normalization (reduction) | ✅ ported (mean via `crop_rect` + sum reduction) |
+| `calculate_abs_diff_rgba` | per-tile abs diff helper | ✅ ported |
+| `calculate_highlights_norm_rgba` | per-tile clipped-highlight weight | ❌ uniform exposure → writes 1.0, dropped |
+| `deconvolute_frequency_domain` | Wiener-style deconvolution of merged Fourier data | ✅ ported |
+| `reduce_artifacts_tile_border` | smooths tile-border artifacts of windowed inverse FFT | ✅ ported |
+
+The frequency pipeline adds two infrastructure kernels (`place_f32` — embed/
+crop a prepared frame into a per-iteration merge canvas at the Swift padding
+offsets, keeping alignment on the shared padding so inspection grids stay
+bit-identical — and `crop_rect`, an asymmetric crop for the canvas output and
+the mismatch-mean rectangle). Note the FFT pair's output bins are mirrored in
+x relative to a naive DFT (intrinsic to the Metal original's butterfly
+mapping); everything downstream is self-consistent with it — the sub-pixel
+shift search stays empirical, and the deconvolution gain tables are
+symmetric.
 
 ### texture/texture.metal (25)
 
@@ -291,8 +323,8 @@ Full Metal kernel census of Burst Photo (52 kernels) and their PoC status:
 | `fill_with_zeros` | clear plane | ✅ via `writeBuffer(0)` |
 | `copy_texture` | plane copy | ✅ via `copyBufferToBuffer` |
 | `convert_float_to_uint16` | final float → 16-bit with black/white level scaling | ✅ ported (`convert_to_u16`) |
-| `convert_to_rgba` | pack 2×2 CFA quad → RGBA (UI preview / helpers) | ✅ done on CPU in preview |
-| `convert_to_bayer` | RGBA → mosaic (used by other modes) | ❌ not needed |
+| `convert_to_rgba` | pack 2×2 CFA quad → RGBA (UI preview / helpers) | ✅ done on CPU in preview; GPU port in the frequency merge |
+| `convert_to_bayer` | RGBA → mosaic (used by other modes) | ✅ ported (frequency merge) |
 | `add_texture_uint16` | accumulate raw u16 plane (temporal-average path) | ❌ |
 | `add_texture_exposure` | exposure-weighted accumulation (bracketing) | ❌ |
 | `add_texture_highlights` | highlight reconstruction from R/B (bracketing) | ❌ |
@@ -313,11 +345,11 @@ Full Metal kernel census of Burst Photo (52 kernels) and their PoC status:
 | `correct_exposure` / `correct_exposure_linear` | shadow lift, linear/curve tone control | ❌ |
 | `max_x` / `max_y` | 1D argmax helpers (curve construction) | ❌ |
 
-**PoC uses 15 of 52 kernels** (11 ported verbatim-ish + copy/fill via buffer ops
-+ reduction re-implemented). The 37 excluded kernels belong to: X-Trans sensors,
-exposure bracketing, the frequency-domain ("higher quality") merge, hot-pixel
-suppression, exposure correction, and performance-optimized variants of ported
-kernels.
+**PoC uses 24 of 52 kernels** (20 ported verbatim-ish + copy/fill via buffer ops
++ reduction re-implemented). The excluded kernels belong to: X-Trans sensors,
+exposure bracketing, highlights normalization (uniform-exposure no-op), the
+generic DFT fallback, hot-pixel suppression, exposure correction, and
+performance-optimized variants of ported kernels.
 
 The alignment inspector adds 5 more kernels, ported or adapted from the Swift
 visualize branch (`viz/visualize.metal`): `diff_f32` (abs-difference plane for

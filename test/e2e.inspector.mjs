@@ -566,6 +566,31 @@ try {
     downloaded.length === 1 && downloaded[0] === 'a_ref_merged_web.dng' && size > 100000,
     `${downloaded.join(', ')} — ${(size / 1000).toFixed(0)} kB`);
 
+  // ---- re-merge with the frequency-domain ("Higher quality") algorithm through the UI ----
+  await page.select('#mergeAlgorithm', 'hq');
+  await page.click('#inspMerge');
+  await page.waitForFunction(() =>
+    document.getElementById('log').textContent.includes('frequency domain (higher quality)'),
+    { timeout: 180000 });
+  await page.waitForFunction(() => {
+    const b = document.getElementById('inspMergedMode');
+    return b && !b.hidden && b.classList.contains('active') && !document.getElementById('inspectorPane').hidden;
+  }, { timeout: 60000 });
+  const hqLog = await page.evaluate(() => {
+    const text = document.getElementById('log').textContent;
+    const summary = text.split('\n').find((l) => l.includes('robustness_norm='));
+    return {
+      reuse: text.includes('reusing the inspection alignment'),
+      warpStages: (text.match(/warp\+merge \d+\//g) || []).length,
+      summary,
+    };
+  });
+  check('frequency merge runs through the UI with reused alignment',
+    hqLog.reuse && hqLog.warpStages >= 1, JSON.stringify(hqLog).slice(0, 120));
+  check('frequency merge logs its robustness parameters and canvas size',
+    /robustness_norm=[\d.]+, read_noise=\d+, max_motion_norm=[\d.]+, merge canvas \d+×\d+/.test(hqLog.summary || ''),
+    hqLog.summary || '(missing)');
+
   check('no page errors during e2e run', pageErrors.length === 0,
     pageErrors.slice(0, 3).join(' | '));
 } catch (err) {

@@ -185,6 +185,23 @@ try {
   check('auto-merge returns to the inspector with the Merged view + Download DNG',
     auto.downloadShown && auto.rows === 4, JSON.stringify(auto));
 
+  // after the run, "Process burst" is greyed because nothing has changed — the wrapper
+  // span carries the why-and-what-next tooltip; touching a setting re-enables the button
+  // and clears it
+  const staleBtn = await page.evaluate(() => ({
+    disabled: document.getElementById('process').disabled,
+    hint: document.getElementById('processWrap').title,
+  }));
+  check('idle after a run: Process burst disabled with the no-changes tooltip',
+    staleBtn.disabled && staleBtn.hint.includes('No settings have changed.'), JSON.stringify(staleBtn));
+  await page.select('#noiseReduction', '8');
+  const dirtyBtn = await page.evaluate(() => ({
+    disabled: document.getElementById('process').disabled,
+    hint: document.getElementById('processWrap').title,
+  }));
+  check('changed setting re-enables Process burst and clears the tooltip',
+    !dirtyBtn.disabled && dirtyBtn.hint === '', JSON.stringify(dirtyBtn));
+
   // ---- pass 2: manual inspection — "Inspect alignment first" checked ----
   // persist the flag through the app's own settings storage and start from a clean page
   await page.evaluate(() =>

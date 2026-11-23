@@ -26,6 +26,7 @@ const inspectorPane = document.getElementById('inspectorPane');
 const fileInput = document.getElementById('fileInput');
 const inspectFirst = document.getElementById('inspectFirst');
 const processBtn = document.getElementById('process');
+const processWrap = document.getElementById('processWrap'); // carries the tooltip: a disabled button swallows hover events, so titles on it never show
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const downloadLink = document.getElementById('download');
@@ -189,7 +190,7 @@ async function loadFiles(fileList) {
   logEl.textContent = '';
   loadedFrames = [];
   disposeInspector();
-  processBtn.disabled = true;
+  updateProcessBtn(); // disabled + clears a stale "nothing changed" tooltip from the previous run
   downloadLink.classList.add('disabled');
   downloadLink.removeAttribute('href');
   showPane('progress');
@@ -577,8 +578,14 @@ processBtn.addEventListener('click', () => {
 // "Process burst" is only clickable when a processed result is out of date:
 // greyed before any burst, during decode/processing, and right after a run
 // finishes. Changing any setting marks the result stale and re-enables it.
+// In the "greyed because nothing changed" state (a completed run with untouched
+// settings), the wrapper span explains why and what to do instead — the title lives
+// there because disabled buttons don't show their own title tooltips.
+const NO_CHANGES_HINT = 'No settings have changed. Change settings to re-process, or drag new photos on the right panel.';
 function updateProcessBtn() {
-  processBtn.disabled = decoding || processing || loadedFrames.length < 2 || !settingsDirty;
+  const busy = decoding || processing;
+  processBtn.disabled = busy || loadedFrames.length < 2 || !settingsDirty;
+  processWrap.title = !processBtn.disabled || busy || loadedFrames.length < 2 ? '' : NO_CHANGES_HINT;
 }
 
 // ---- persisted settings ----

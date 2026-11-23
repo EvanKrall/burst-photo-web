@@ -24,6 +24,9 @@
 //   automatic placement).
 // - The frame list supports checking/unchecking images (excluded from the merge), and multi-
 //   selection with cmd-click (toggle one) and shift-click (toggle a range).
+// - "Make reference" (merge-bar button or the r key) designates the selected frame as the
+//   reference: the callback hands control back to the app, which re-aligns the whole burst
+//   against it and rebuilds this view with the user's selections carried over.
 // - Arrow keys scrub through frames IN LOCKSTEP with the preview: while a render is in flight,
 //   repeated steps coalesce into one pending move that is applied when the render finishes.
 
@@ -39,11 +42,14 @@ export class InspectorUI {
   /**
    * @param {InspectionSession} session from performInspection()
    * @param {{ onMerge: (includedFrames: Array) => void,
+   *           onReferenceChange?: (frameIdx: number) => void,
    *           initialRoi?: {x0:number,y0:number,x1:number,y1:number}|null }} opts
    *   initialRoi: subject area detected from the reference frame's AF metadata; when
    *   omitted (or arriving late via applyAfAreaRoi), the centered half is used.
+   *   onReferenceChange: designate the given frame as the new reference (re-inspects).
    */
-  constructor(session, { onMerge, initialRoi = null }) {
+  constructor(session, { onMerge, onReferenceChange = null, initialRoi = null }) {
+    this.onReferenceChange = onReferenceChange;
     this.session = session;
     this.onMerge = onMerge;
 
@@ -76,6 +82,7 @@ export class InspectorUI {
       infoLine: $('inspInfoLine'),
       mergeText: $('inspMergeText'),
       mergeBtn: $('inspMerge'),
+      makeRef: $('inspMakeRef'),
       mergedMode: $('inspMergedMode'),
       downloadDng: $('inspDownloadDng'),
     };
@@ -281,6 +288,12 @@ export class InspectorUI {
 
   bindEvents() {
     const el = this.el;
+    // All DOM listeners live on one AbortSignal: the UI is rebuilt on re-inspection
+    // against a fresh session, and the persistent toolbar/button elements would
+    // otherwise accumulate listeners firing with stale closures (the merge button once
+    // re-merged a previous burst with a previous session's alignment grids).
+    this.listeners = new AbortController();
+    const signal = this.listeners.signal;
 
     // the render target size is measured from the pane's live box, so a pane size change
     // (hidden → shown, window resize, column drag) needs a re-render at the new size;
@@ -299,31 +312,31 @@ export class InspectorUI {
     el.modes.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-mode]');
       if (btn) this.setMode(btn.dataset.mode);
-    });
+    }, { signal });
     el.alignShared.addEventListener('change', () => {
       this.state.alignShared = el.alignShared.checked;
       this.refreshToolbar();
       this.scheduleRender();
-    });
+    }, { signal });
     el.alignScale.addEventListener('input', () => {
       this.state.alignManualScale = Number(el.alignScale.value);
       this.refreshToolbar();
       this.scheduleRender();
-    });
+    }, { signal });
     el.matchExposure.addEventListener('change', () => {
       this.state.matchExposure = el.matchExposure.checked;
       el.diffShared.disabled = !this.state.matchExposure;
       this.scheduleRender();
-    });
+    }, { signal });
     el.diffShared.addEventListener('change', () => {
       this.state.diffShared = el.diffShared.checked;
       this.scheduleRender();
-    });
+    }, { signal });
     el.diffGain.addEventListener('input', () => {
       this.state.diffGain = Number(el.diffGain.value);
       el.diffGainLabel.textContent = `gain ${this.state.diffGain.toFixed(1)}`;
       this.scheduleRender();
-    });
+    }, { signal });
     // subject box color: the select is the source of truth; restore the persisted choice
     try {
       const saved = localStorage.getItem('bpw.subjectBoxColor');
@@ -333,22 +346,22 @@ export class InspectorUI {
     el.roiColor.addEventListener('change', () => {
       try { localStorage.setItem('bpw.subjectBoxColor', el.roiColor.value); } catch { /* ignore */ }
       this.drawOverlay();
-    });
+    }, { signal });
 
     el.clearAnchor.addEventListener('click', () => {
       this.state.anchor = null;
       this.state.anchorManual = true; // manual removal: ROI changes no longer re-place the anchor
       this.refreshToolbar();
       this.scheduleRender();
-    });
+    }, { signal });
     el.colHead.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-sort]');
       if (!btn) return;
       this.state.sortMode = Number(btn.dataset.sort);
       for (const b of el.colHead.querySelectorAll('button')) b.classList.toggle('active', b === btn);
       this.rebuildOrder();
-    });
-    el.clearRoi.addEventListener('click', () => this.setRoi(null));
+    }, { signal });
+    el.clearRoi.addEventListener('click', () => this.setRoi(null), { signal });
     // re-apply the AF-area-derived subject area (hidden until detection reports one). Like
     // the automatic application, the anchor is re-placed at the area's center: hand anchor
     // control back to the automatic placement, then setRoi puts the anchor at the midpoint.
@@ -356,7 +369,7 @@ export class InspectorUI {
       if (!this.afRoi) return;
       this.state.anchorManual = false;
       this.setRoi(this.afRoi);
-    });
+    }, { signal });
 
     // frame list rows: click = select, cmd-click = toggle in selection, shift-click = range,
     // checkbox = include/exclude (multi-selection follows)
@@ -369,7 +382,7 @@ export class InspectorUI {
         return;
       }
       this.rowClicked(idx, e.metaKey || e.ctrlKey, e.shiftKey);
-    });
+    }, { signal });
 
     // image area: drag = mark subject area, plain click = anchor, double-click = reset zoom
     let drag = null; // {startX, startY, isRoi, liveRect, clickCount}
@@ -383,7 +396,7 @@ export class InspectorUI {
       drag = { startX: pos.x, startY: pos.y, isRoi: false, liveRect: null,
                inside: pos.x >= rect.x && pos.x <= rect.x + rect.w && pos.y >= rect.y && pos.y <= rect.y + rect.h };
       e.preventDefault();
-    });
+    }, { signal });
     overlay.addEventListener('pointermove', (e) => {
       if (!drag) return;
       const rect = this.fittedRect();
@@ -394,7 +407,7 @@ export class InspectorUI {
       }
       drag.liveRect = this.clampToRect(rect, drag.startX, drag.startY, pos.x, pos.y);
       this.drawOverlay(drag.liveRect);
-    });
+    }, { signal });
     overlay.addEventListener('pointerup', (e) => {
       if (!drag) return;
       const wasDrag = drag.isRoi;
@@ -418,35 +431,37 @@ export class InspectorUI {
       const rect = this.fittedRect();
       const pos = this.overlayPos(e);
       this.setAnchor((pos.x - rect.x) / rect.w, (pos.y - rect.y) / rect.h);
-    });
-    overlay.addEventListener('pointercancel', () => { drag = null; this.drawOverlay(); });
+    }, { signal });
+    overlay.addEventListener('pointercancel', () => { drag = null; this.drawOverlay(); }, { signal });
 
     // wheel: zoom centered on the cursor (ctrl+wheel = trackpad pinch; browser zoom is blocked)
     el.imageWrap.addEventListener('wheel', (e) => {
       e.preventDefault();
       const factor = Math.exp(-e.deltaY * 0.0015);
       this.setZoom(clamp(this.state.zoom * factor, 1, 16), e);
-    }, { passive: false });
+    }, { passive: false, signal });
 
     // when zoomed, the canvas covers only the visible crop — pan must re-render around
     // the new area (cheap: pane-sized box-average of the cached full-res develop)
     el.imageWrap.addEventListener('scroll', () => {
       if (this._renderedCrop) this.scheduleRender();
-    }, { passive: true });
+    }, { passive: true, signal });
 
     // merge
     el.mergeBtn.addEventListener('click', () => {
       const included = this.includedFrames();
       if (included.length < 2) return;
       this.onMerge(included.map((f) => f.idx));
-    });
-    el.mergedMode.addEventListener('click', () => this.setMode('merged'));
+    }, { signal });
+    // designate the selected frame as the reference (button + r key)
+    el.makeRef.addEventListener('click', () => this.requestReferenceChange(), { signal });
+    el.mergedMode.addEventListener('click', () => this.setMode('merged'), { signal });
     // download the merged DNG via the app-wide download link (a click on the anchor
     // with a blob href + download attribute saves the file)
     el.downloadDng.addEventListener('click', () => {
       const a = document.getElementById('download');
       if (a && !a.classList.contains('disabled')) a.click();
-    });
+    }, { signal });
 
     // keyboard navigation (only while the inspector is visible and no text input has focus)
     this.keyHandler = (e) => {
@@ -466,18 +481,73 @@ export class InspectorUI {
       } else if (e.key === ' ') {
         e.preventDefault();
         this.toggleIncluded(this.state.selectedIdx);
+      } else if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        this.requestReferenceChange();
       }
     };
-    window.addEventListener('keydown', this.keyHandler);
+    window.addEventListener('keydown', this.keyHandler, { signal });
   }
 
   destroy() {
     if (this.paneObserver) this.paneObserver.disconnect();
-    window.removeEventListener('keydown', this.keyHandler);
+    this.listeners?.abort(); // removes every DOM listener bound in bindEvents
+    window.removeEventListener('keydown', this.keyHandler); // legacy no-op, kept for safety
     this.aborted = true;
   }
 
   // ------------------------------------------------------------- state mutations
+
+  /** Designate the selected frame as the reference (no-op for the current reference). */
+  requestReferenceChange() {
+    if (!this.onReferenceChange || this.aborted) return;
+    if (this.state.selectedIdx === this.session.refIdx) return;
+    this.onReferenceChange(this.state.selectedIdx);
+  }
+
+  /**
+   * Carry user decisions over from a previous inspection view (used when the burst is
+   * re-aligned against a newly designated reference): frame exclusions, subject area,
+   * anchor position, mode and control settings. Selection resets to the new reference.
+   */
+  restoreState(carried) {
+    if (!carried) return;
+    const s = this.state;
+    if (carried.excluded) s.excluded = new Set(carried.excluded);
+    if (carried.roi !== undefined) {
+      s.roi = carried.roi;
+      s.roiTouched = !!carried.roiTouched;
+      this.el.clearRoi.hidden = !s.roi;
+    }
+    if (carried.anchor !== undefined) {
+      s.anchor = carried.anchor && this.session.frame(this.state.selectedIdx)
+        ? this.sceneAnchor(carried.anchor.u, carried.anchor.v) : carried.anchor;
+      s.anchorManual = !!carried.anchorManual;
+    }
+    if (carried.alignShared !== undefined) {
+      s.alignShared = carried.alignShared;
+      s.alignManualScale = carried.alignManualScale;
+      this.el.alignShared.checked = s.alignShared;
+      this.el.alignScale.value = s.alignManualScale;
+    }
+    if (carried.diffShared !== undefined) {
+      s.diffShared = carried.diffShared;
+      s.diffGain = carried.diffGain;
+      s.matchExposure = carried.matchExposure;
+      this.el.diffShared.checked = s.diffShared;
+      this.el.diffGain.value = s.diffGain;
+      this.el.diffGainLabel.textContent = `gain ${s.diffGain.toFixed(1)}`;
+      this.el.matchExposure.checked = s.matchExposure;
+      this.el.diffShared.disabled = !s.matchExposure;
+    }
+    if (carried.mode && (MODES.includes(carried.mode) || carried.mode === 'merged')) {
+      s.mode = MODES.includes(carried.mode) ? carried.mode : 'alignment';
+    }
+    this.refreshToolbar();
+    this.refreshIncluded();
+    this.drawOverlay();
+    this.scheduleRender();
+  }
 
   setMode(mode) {
     const known = this.mergedResult ? [...MODES, 'merged'] : MODES;
@@ -1064,6 +1134,11 @@ export class InspectorUI {
   refreshStatsBar() {
     const s = this.state;
     const f = this.session.frame(s.selectedIdx);
+    // "Make reference" acts on the selected frame — enabled unless it already is the reference
+    this.el.makeRef.disabled = !this.onReferenceChange || s.selectedIdx === this.session.refIdx;
+    this.el.makeRef.title = s.selectedIdx === this.session.refIdx
+      ? 'The selected frame already is the reference'
+      : `Designate frame ${String(s.selectedIdx).padStart(2, '0')} as the reference frame and re-align the burst against it (r)`;
     let stats;
     if (f.isRef) {
       stats = `frame ${f.idx} — ${f.name} — reference frame`;
@@ -1083,6 +1158,6 @@ export class InspectorUI {
     const calibText = calibrating ? ` · measuring shared scale… ${this.session.calibrationProgress}/${this.session.comparisonFrames().length}` : '';
     this.el.statsLine.textContent = stats + calibText;
     this.el.infoLine.textContent = [s.renderedInfo, anchorText].filter(Boolean).join('')
-      + '  — ↑/↓ frame · ←/→ mode · space = check · click = anchor, drag = subject area · wheel = zoom, double-click reset';
+      + '  — ↑/↓ frame · ←/→ mode · space = check · r = make reference · click = anchor, drag = subject area · wheel = zoom, double-click reset';
   }
 }

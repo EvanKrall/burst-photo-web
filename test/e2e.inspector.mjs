@@ -263,6 +263,66 @@ try {
   const mergeAfterExclude = await page.evaluate(() => document.getElementById('inspMerge').textContent);
   check('merge counts excluded frame', /Merge 3 of 4 images/.test(mergeAfterExclude), mergeAfterExclude);
 
+  // ---- designate a different frame as the reference ----
+  // the "Make reference" button must be disabled while the reference itself is selected
+  await page.evaluate(() => {
+    [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-file').textContent === 'c_identical.dng')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  const refBtnOnRef = await page.evaluate(() => ({
+    disabled: document.getElementById('inspMakeRef').disabled,
+    title: document.getElementById('inspMakeRef').title,
+  }));
+  check('Make reference disabled while the reference is selected', refBtnOnRef.disabled,
+    refBtnOnRef.title);
+
+  // select the shifted frame and designate it (button click); the burst is re-aligned
+  // against it and the view is rebuilt with the exclusion carried over
+  await page.evaluate(() => {
+    [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-file').textContent === 'b_shifted.dng')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  await page.click('#inspMakeRef');
+  // re-inspection shows the progress pane, then the inspector comes back
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('.insp-refbadge')].length === 1
+    && [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-refbadge'))
+      ?.querySelector('.insp-file').textContent === 'b_shifted.dng',
+    { timeout: 120000 });
+  const reRef = await page.evaluate(() => ({
+    excludedSubject: [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-file').textContent === 'd_subject.dng')
+      ?.querySelector('.insp-check').classList.contains('included') === false,
+    mergeText: document.getElementById('inspMerge').textContent,
+    refBtnEnabled: !document.getElementById('inspMakeRef').disabled,
+    refLog: document.getElementById('log').textContent.includes('as the reference…'),
+  }));
+  check('reference badge moved to the designated frame', true, ''); // asserted by the waitForFunction above
+  check('exclusions survive the re-inspection', reRef.excludedSubject);
+  check('Make reference re-enabled for another designation', reRef.refBtnEnabled);
+  check('reference change logged', reRef.refLog);
+  const mergeTextAfterRef = reRef.mergeText;
+  check('merge bar still counts the carried exclusion', /Merge 3 of 4 images/.test(mergeTextAfterRef), mergeTextAfterRef);
+
+  // keyboard shortcut: select the original first frame (a_ref) and press r
+  await page.evaluate(() => {
+    [...document.querySelectorAll('.insp-row')]
+      .find((r) => r.querySelector('.insp-file').textContent === 'a_ref.dng')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  await page.keyboard.press('r');
+  await page.waitForFunction(() => {
+    const badge = [...document.querySelectorAll('.insp-row')].find((r) => r.querySelector('.insp-refbadge'));
+    return badge?.querySelector('.insp-file').textContent === 'a_ref.dng';
+  }, { timeout: 120000 });
+  check('r key designates the selected frame as the reference', true);
+
   // mode switch to Difference and back renders without errors
   await page.click('#inspModes button[data-mode="difference"]');
   await new Promise((r) => setTimeout(r, 1500));
@@ -499,8 +559,11 @@ try {
   await page.click('#inspDownloadDng');
   const downloaded = await dlPromise;
   const size = statSync(join(downloadDir, downloaded[0])).size;
-  check('Download DNG lands the merged file on disk',
-    downloaded.length === 1 && downloaded[0].endsWith('.dng') && size > 100000,
+  // the merge ran after "Make reference" designated a_ref (frame 0), so the output name
+  // must follow the designated reference, not the burst center — a stale pre-fix merge
+  // listener once fired with the old session and named the file c_identical*.dng
+  check('Download DNG lands the merged file on disk, named for the designated reference',
+    downloaded.length === 1 && downloaded[0] === 'a_ref_merged_web.dng' && size > 100000,
     `${downloaded.join(', ')} — ${(size / 1000).toFixed(0)} kB`);
 
   check('no page errors during e2e run', pageErrors.length === 0,

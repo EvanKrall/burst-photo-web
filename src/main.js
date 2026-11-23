@@ -199,7 +199,7 @@ async function loadFiles(fileList) {
       log(`${f.name}: ${frame.width}x${frame.height}, black=${JSON.stringify(frame.blackLevel)}, white=${frame.whiteLevel} (${ms} ms)`);
       await yieldToUI();
     }
-    log(`Loaded ${loadedFrames.length} frames in ${(decodeMsTotal / 1000).toFixed(2)} s (${(decodeMsTotal / files.length).toFixed(0)} ms/frame average). Reference frame: ${loadedFrames[Math.floor(loadedFrames.length / 2)].name} (burst center)`);
+    log(`Loaded ${loadedFrames.length} frames in ${(decodeMsTotal / 1000).toFixed(2)} s (${(decodeMsTotal / files.length).toFixed(0)} ms/frame average). Default reference frame: ${loadedFrames[Math.floor(loadedFrames.length / 2)].name} (burst center — pick another with "Make reference" in the inspector)`);
     recordTiming('decodePerShot', decodeMsTotal / files.length);
     setProgress(stageProgress('decode', 1), 'decoding complete');
   } catch (err) {
@@ -222,23 +222,65 @@ async function loadFiles(fileList) {
 
 const yieldToUI = () => new Promise((r) => setTimeout(r, 0));
 
+// Snapshot of an inspection view's user decisions, for carrying them across a
+// re-inspection triggered by "Make reference".
+function carriedInspectionState() {
+  if (!inspector) return null;
+  const s = inspector.state;
+  return {
+    excluded: new Set(s.excluded),
+    roi: s.roi,
+    roiTouched: s.roiTouched,
+    anchor: s.anchor ? { u: s.anchor.u, v: s.anchor.v } : null,
+    anchorManual: s.anchorManual,
+    mode: s.mode === 'merged' ? 'alignment' : s.mode, // the merged result is stale after re-alignment
+    alignShared: s.alignShared,
+    alignManualScale: s.alignManualScale,
+    diffShared: s.diffShared,
+    diffGain: s.diffGain,
+    matchExposure: s.matchExposure,
+  };
+}
+
+// Designate frame idx as the new reference: dispose the current inspection view
+// (freeing its GPU planes), re-align the whole burst against the new reference and
+// rebuild the view with the user's decisions carried over.
+async function redesignateReference(idx) {
+  if (decoding || processing) {
+    log('Still working — the reference can only be changed while the burst is idle.');
+    return;
+  }
+  log(`Re-aligning with frame ${String(idx).padStart(2, '0')} (${loadedFrames[idx].name}) as the reference…`);
+  const carried = carriedInspectionState();
+  disposeInspector();
+  await runInspection(idx, carried);
+}
+
 // Captures the live inspection session's alignment grids for a merge (null while no
 // inspection view exists). Set by runInspection, cleared by disposeInspector.
 let inspectionReuse = null;
 
 // ---- alignment inspection (pre-merge review) ----
-async function runInspection() {
+// refIdxOverride: designate a specific frame as the reference ("Make reference" action);
+// defaults to the burst center. carried: user decisions from a previous inspection view
+// (exclusions, subject area, anchor, controls) to restore in the rebuilt view.
+async function runInspection(refIdxOverride = null, carried = null) {
   if (decoding || processing || loadedFrames.length < 2) return;
   setProgress(0, 'aligning…');
-  const refIdx = Math.floor(loadedFrames.length / 2);
+  const refIdx = Number.isInteger(refIdxOverride)
+    ? refIdxOverride
+    : Math.floor(loadedFrames.length / 2);
   // AF-area detection runs in parallel with the alignment: WASM exiftool on the
   // reference frame's maker notes (lazy-loaded — the ~25 MB interpreter downloads on
   // the first inspection only). The result becomes the default subject area unless the
-  // user has already drawn one by the time it arrives.
+  // user has already drawn one by the time it arrives. Skipped on re-inspection with a
+  // carried-over subject area — the existing box was chosen against the same scene.
   const refFile = loadedFrames[refIdx].file;
-  const afRoiPromise = detectAfAreaRoi(refFile.name, refFile)
-    .then((roi) => ({ roi, error: null }))
-    .catch((err) => ({ roi: null, error: err?.message || String(err) }));
+  const afRoiPromise = carried?.roi
+    ? Promise.resolve({ roi: null, error: null })
+    : detectAfAreaRoi(refFile.name, refFile)
+        .then((roi) => ({ roi, error: null }))
+        .catch((err) => ({ roi: null, error: err?.message || String(err) }));
   try {
     log('Initializing WebGPU…');
     const { adapter, device } = await initGPU();
@@ -284,22 +326,29 @@ async function runInspection() {
         showPane('progress');
         await processBurst(includedIndices, { reuse, returnToInspector: true });
       },
+      // "Make reference" re-aligns the burst against the chosen frame and rebuilds
+      // this view with the user's decisions carried over
+      onReferenceChange: (idx) => redesignateReference(idx),
     });
     window.__inspector = inspector; // exposed for tests
+    inspector.restoreState(carried);
     // apply the AF area (if any) as the subject area — by now it has usually finished
-    // downloading/running alongside the alignment
-    const { roi: afRoi, error: afError } = await afRoiPromise;
-    if (afRoi) {
-      const pct = (v) => Math.round(v * 100);
-      if (inspector.applyAfAreaRoi(afRoi)) {
-        log(`AF area from ${refFile.name} maker notes: x ${pct(afRoi.x0)}-${pct(afRoi.x1)}%, y ${pct(afRoi.y0)}-${pct(afRoi.y1)}% — using it as the subject area.`);
+    // downloading/running alongside the alignment. On a "Make reference" re-inspection
+    // the subject area was carried over, so there is nothing to apply or report.
+    if (!carried?.roi) {
+      const { roi: afRoi, error: afError } = await afRoiPromise;
+      if (afRoi) {
+        const pct = (v) => Math.round(v * 100);
+        if (inspector.applyAfAreaRoi(afRoi)) {
+          log(`AF area from ${refFile.name} maker notes: x ${pct(afRoi.x0)}-${pct(afRoi.x1)}%, y ${pct(afRoi.y0)}-${pct(afRoi.y1)}% — using it as the subject area.`);
+        } else {
+          log(`AF area found, but you already set a subject area — keeping yours.`);
+        }
+      } else if (afError) {
+        log(`AF-area detection failed (${afError}) — subject area defaults to the centered half.`);
       } else {
-        log(`AF area found, but you already set a subject area — keeping yours.`);
+        log(`No AF area metadata in the reference frame (currently decoded for Nikon Z bodies) — subject area defaults to the centered half.`);
       }
-    } else if (afError) {
-      log(`AF-area detection failed (${afError}) — subject area defaults to the centered half.`);
-    } else {
-      log(`No AF area metadata in the reference frame (currently decoded for Nikon Z bodies) — subject area defaults to the centered half.`);
     }
     log('Merge the checked frames with the button in the inspector (or "Process burst" with all frames).');
   } catch (err) {
@@ -311,7 +360,8 @@ async function runInspection() {
 
 // ---- processing ----
 // frameIndices: optional list of indices into loadedFrames to merge (inspector selection);
-// defaults to every loaded frame. The reference is the center frame of the merged list.
+// defaults to every loaded frame. The reference is the inspection's reference when merging
+// with alignment reuse, otherwise the center frame of the merged list (Burst Photo default).
 async function processBurst(frameIndices = null, { reuse = null, returnToInspector = false } = {}) {
   if (decoding || processing) {
     log('Still working — wait for the current operation to finish first.');

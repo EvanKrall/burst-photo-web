@@ -270,6 +270,16 @@ export function crop(gpu, plane, padX, padY) {
   return out;
 }
 
+// Asymmetric crop (out_w × out_h at offset (x0, y0)) — used by the frequency-domain
+// merge for the per-iteration canvas crop and the mismatch-mean tile rectangle.
+export function cropRectFn(gpu, plane, outW, outH, x0, y0) {
+  const out = new Plane(gpu.zeros('crop-rect', outW * outH * 4), outW, outH);
+  gpu.dispatch('crop_rect',
+    [{ buffer: plane.buf }, { buffer: out.buf },
+     { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [plane.w, outW, outH, x0, y0]) }], groups(outW, outH));
+  return out;
+}
+
 function upsampleNearest(gpu, align, outW, outH) {
   const out = new Plane(gpu.zeros('align-up', outW * outH * 8), outW, outH); // vec2<i32>
   gpu.dispatch('upsample_nearest_i32',
@@ -352,22 +362,39 @@ export function alignTextureEx(gpu, refPyramid, compPadded, { nLevels, downscale
  * or a grid uploaded from an inspection session's retained texels). Shared by the
  * align+merge pipeline and the alignment-reuse path so the warp is defined in one place.
  */
-function warpWithGrid(gpu, refPyramid, compPadded, align, { downscaleFactorArray, tileSizeArray }) {
-  // Metal passes half_tile_size = (downscale==2 ? 1 : downscale) * tile_size,
-  // i.e. tile_size for Bayer, and the level-0 tile grid (computed on the
-  // half-resolution pyramid base).
-  const halfTile = downscaleFactorArray[0] === 2 ? 1 * tileSizeArray[0] : downscaleFactorArray[0] * tileSizeArray[0];
-  const nTilesX = Math.floor(refPyramid[0].w / (tileSizeArray[0] / 2)) - 1;
-  const nTilesY = Math.floor(refPyramid[0].h / (tileSizeArray[0] / 2)) - 1;
+export function warpWithGrid(gpu, refPyramid, compPadded, align, { downscaleFactorArray, tileSizeArray }) {
+  return warpPlane(gpu, compPadded, align,
+    alignmentGridGeometry(refPyramid[0].w, refPyramid[0].h, downscaleFactorArray, tileSizeArray));
+}
+
+/**
+ * Tile geometry of the level-0 alignment grid for a padded frame: tiles of `tileSize`
+ * level-0 px with 50% overlap (grid pitch = tileSize/2), tile (ix, iy) centered at
+ * level-0 (ix+1, iy+1)*tileSize/2. `halfTile` is what the warp kernel receives
+ * (Metal passes (downscale==2 ? 1 : downscale) * tile_size, i.e. tile_size for Bayer).
+ */
+export function alignmentGridGeometry(paddedW, paddedH, downscaleFactorArray, tileSizeArray) {
+  const downscale = downscaleFactorArray[0];
+  return {
+    nTilesX: Math.floor(paddedW / (tileSizeArray[0] / 2)) - 1,
+    nTilesY: Math.floor(paddedH / (tileSizeArray[0] / 2)) - 1,
+    halfTile: (downscale === 2 ? 1 : downscale) * tileSizeArray[0],
+    downscale,
+  };
+}
+
+/** Warp with an explicit geometry (see alignmentGridGeometry) — used by the spatial
+ *  pipeline and the frequency-domain merge (which warps on the alignment padding, then
+ *  re-places the result into the per-iteration merge canvases). */
+export function warpPlane(gpu, compPadded, align, { halfTile, nTilesX, nTilesY, downscale }) {
   if (align.w !== nTilesX || align.h !== nTilesY) {
     throw new Error(`alignment grid ${align.w}×${align.h} does not match the derived tile grid ${nTilesX}×${nTilesY}`);
   }
-
   const out = new Plane(gpu.zeros('warped', compPadded.size), compPadded.w, compPadded.h);
   gpu.dispatch('warp_bayer',
     [{ buffer: compPadded.buf }, { buffer: out.buf }, { buffer: align.buf },
      { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32', 'i32'],
-       [compPadded.w, compPadded.h, halfTile, nTilesX, nTilesY, downscaleFactorArray[0]]) }], groups(compPadded.w, compPadded.h));
+       [compPadded.w, compPadded.h, halfTile, nTilesX, nTilesY, downscale]) }], groups(compPadded.w, compPadded.h));
   return out;
 }
 

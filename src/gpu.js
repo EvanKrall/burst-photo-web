@@ -6,7 +6,15 @@ export async function initGPU() {
   }
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('No suitable GPU adapter found.');
-  const device = await adapter.requestDevice();
+  // The frequency-domain merge works on float planes ~8× the image size (the FT plane of
+  // a 24 MP burst is ~200 MB), beyond the 128 MiB default binding limit — request the
+  // adapter's maximum buffer limits when they are larger.
+  const requiredLimits = {};
+  for (const key of ['maxStorageBufferBindingSize', 'maxBufferSize']) {
+    const max = adapter.limits[key];
+    if (max > 128 * 1024 * 1024) requiredLimits[key] = max;
+  }
+  const device = await adapter.requestDevice({ requiredLimits });
   return { adapter, device };
 }
 
@@ -64,6 +72,20 @@ export class GPUContext {
     );
     this.device.queue.writeBuffer(buf, 0, new Uint8Array(byteSize));
     return buf;
+  }
+
+  // GPU-side buffer copy (byteSize must be a multiple of 4) — e.g. seeding the merged
+  // frequency-domain accumulator with the reference spectrum.
+  copyBuffer(label, src, byteSize) {
+    const dst = this.makeBuffer(
+      label,
+      byteSize,
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    );
+    const encoder = this.device.createCommandEncoder({ label: `copy:${label}` });
+    encoder.copyBufferToBuffer(src, 0, dst, 0, byteSize);
+    this.device.queue.submit([encoder.finish()]);
+    return dst;
   }
 
   /**

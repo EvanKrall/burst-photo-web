@@ -60,7 +60,7 @@ try {
   await page.goto(`http://localhost:${port}/`, { waitUntil: 'load' });
 
   const out = await page.evaluate(async () => {
-    const { initGPU, GPUContext } = await import('/src/gpu.js');
+    const { initGPU, GPUContext, packUniforms } = await import('/src/gpu.js');
     const { WGSL } = await import('/src/kernels.js');
     const { alignMergeSpatial } = await import('/src/pipeline.js');
     const { performInspection } = await import('/src/inspect.js');
@@ -290,6 +290,158 @@ try {
     }
     session.destroy();
 
+    // ---- T10-T14: frequency-domain merge (Burst Photo "Higher quality" port) ----
+    const t10 = {};
+    {
+      const { alignMergeFrequencyDomain, deriveFrequencySetup, frequencyMergeParams } =
+        await import('/src/merge_frequency.js');
+      const { Plane } = await import('/src/pipeline.js');
+
+      // T10a: geometry derivation matches the Swift padding math
+      // (W=256, tile 32 → tileFactor 64 → pad_align 28 → pad_merge 12 → canvas 288 = 18 tiles)
+      const fa = { tileSizeArray: [32, 16], nLevels: 2, downscaleFactorArray: [2, 2] };
+      const f256 = deriveFrequencySetup(256, 256, fa);
+      t10.geometry = f256;
+      t10.geometryOk = f256.canvasW === 288 && f256.canvasH === 288 && f256.nTilesX === 18 && f256.padMergeX === 12;
+      t10.paramsOk = (() => {
+        const p = frequencyMergeParams(13);
+        // robustness_rev = 0.5·(26.5-13) = 6.75 → 2^0.75, read = (2^3.25)^1.6, mmn = 1.3^4.25
+        const eps = (a, b) => Math.abs(a - b) < 1e-9 * Math.max(1, b);
+        return eps(p.robustnessNorm, Math.pow(2, 0.75))
+          && eps(p.readNoise, Math.pow(Math.pow(2, 3.25), 1.6))
+          && eps(p.maxMotionNorm, Math.pow(1.3, 4.25));
+      })();
+
+      // T10b: FFT pair — backward(forward(x)) == window·x on a 2×2-tile random plane
+      {
+        const TW = 16, TH = 16;
+        const rgba = new Float32Array(TW * TH * 4);
+        for (let i = 0; i < TW * TH * 4; i++) rgba[i] = 500 + 3000 * ((Math.sin(i * 12.9898) * 43758.5453) % 1);
+        const inBuf = gpu.storageFromData('fft-in', rgba);
+        const ftBuf = gpu.zeros('fft-ft', TW * 2 * TH * 16);
+        const outBuf = gpu.zeros('fft-out', TW * TH * 16);
+        gpu.dispatch('forward_fft',
+          [{ buffer: inBuf }, { buffer: ftBuf }, { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'f32'], [TW, TW * 2, 2, 2, 0]) }],
+          [1, 1, 1]);
+        gpu.dispatch('backward_fft',
+          [{ buffer: ftBuf }, { buffer: outBuf }, { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'f32'], [TW, TW * 2, 2, 2, 64]) }],
+          [1, 1, 1]);
+        await device.queue.onSubmittedWorkDone();
+        const round = new Float32Array(await gpu.readBack(outBuf, TW * TH * 16));
+        let maxErr = 0;
+        const wv = (d) => 0.5 - 0.5 * Math.cos(Math.PI * (d + 0.5) / 4);
+        for (let y = 0; y < TH; y++) for (let x = 0; x < TW; x++) {
+          const w = wv(x % 8) * wv(y % 8);
+          for (let ch = 0; ch < 4; ch++) {
+            const i = (y * TW + x) * 4 + ch;
+            maxErr = Math.max(maxErr, Math.abs(round[i] - w * rgba[i]));
+          }
+        }
+        t10.fftRoundTrip = maxErr;
+        inBuf.destroy(); ftBuf.destroy(); outBuf.destroy();
+      }
+
+      // T10c: place → rgba → bayer round trip preserves values
+      {
+        const SW = 64, SH = 64, CW = 96, CH = 96, OX = 12, OY = 20;
+        const src = new Float32Array(SW * SH);
+        for (let i = 0; i < src.length; i++) src[i] = 100 + ((i * 7919) % 900);
+        const srcBuf = gpu.storageFromData('place-in', src);
+        const canvas = new Plane(gpu.zeros('place-canvas', CW * CH * 4), CW, CH);
+        gpu.dispatch('place_f32',
+          [{ buffer: srcBuf }, { buffer: canvas.buf },
+           { buffer: packUniforms(['i32', 'i32', 'i32', 'i32', 'i32'], [SW, SH, CW, OX, OY]) }],
+          [Math.ceil(CW / 8), Math.ceil(CH / 8), 1]);
+        const rgbaP = new Plane(gpu.zeros('place-rgba', CW * CH * 4), CW / 2, CH / 2);
+        gpu.dispatch('convert_to_rgba',
+          [{ buffer: canvas.buf }, { buffer: rgbaP.buf },
+           { buffer: packUniforms(['i32', 'i32', 'i32'], [CW, CW / 2, CH / 2]) }],
+          [Math.ceil(CW / 16), Math.ceil(CH / 16), 1]);
+        const back = new Plane(gpu.zeros('place-back', CW * CH * 4), CW, CH);
+        gpu.dispatch('convert_to_bayer',
+          [{ buffer: rgbaP.buf }, { buffer: back.buf },
+           { buffer: packUniforms(['i32'], [CW]) }],
+          [Math.ceil(CW / 16), Math.ceil(CH / 16), 1]);
+        await device.queue.onSubmittedWorkDone();
+        const out = new Float32Array(await gpu.readBack(back.buf, CW * CH * 4));
+        let maxErr = 0;
+        for (let y = 0; y < SH; y++) for (let x = 0; x < SW; x++) {
+          maxErr = Math.max(maxErr, Math.abs(out[(y + OY) * CW + (x + OX)] - src[y * SW + x]));
+        }
+        let zeroOk = true;
+        for (let y = 0; y < CH; y++) for (let x = 0; x < CW; x++) {
+          const inSrc = x >= OX && x < OX + SW && y >= OY && y < OY + SH;
+          if (!inSrc && out[y * CW + x] !== 0) zeroOk = false;
+        }
+        t10.placeRgbaBayer = { maxErr, zeroOk };
+        srcBuf.destroy(); canvas.buf.destroy(); rgbaP.buf.destroy(); back.buf.destroy();
+      }
+
+      // T11: full frequency merge — identical frames reproduce the reference
+      // (tight on a constant image: only plumbing noise; the textured burst additionally
+      // exercises Burst Photo's deconvolution sharpening, so it gets loose bounds)
+      const flat = (v) => {
+        const data = new Uint16Array(W * H);
+        for (let i = 0; i < data.length; i++) data[i] = v;
+        return { width: W, height: H, data, blackLevel: BLACK, whiteLevel: WHITE, name: `flat${v}` };
+      };
+      const rf = flat(800);
+      const rFlat = await alignMergeFrequencyDomain(gpu, [rf, flat(800)], opts, null);
+      let flatMax = 0;
+      for (let y = 8; y < H - 8; y++) for (let x = 8; x < W - 8; x++) {
+        flatMax = Math.max(flatMax, Math.abs(rFlat.pixels[y * W + x] - 800));
+      }
+      t10.flatIdentical = flatMax;
+
+      const refF = mkFrame();
+      const rIdent = await alignMergeFrequencyDomain(gpu, [refF, mkFrame()], opts, null);
+      let identMax = 0, identSum = 0, identN = 0;
+      for (let y = 8; y < H - 8; y++) for (let x = 8; x < W - 8; x++) {
+        const d = Math.abs(rIdent.pixels[y * W + x] - refF.data[y * W + x]);
+        identMax = Math.max(identMax, d); identSum += d; identN++;
+      }
+      t10.identical = { max: identMax, mean: identSum / identN };
+
+      // T12: shifted comparison frame — the sub-pixel alignment must track it much
+      // better than a no-alignment merge would (interior mean |diff|)
+      const noAlign = (dx, dy) => {
+        let sum = 0, n = 0;
+        const f = mkFrame(dx, dy);
+        for (let y = 8; y < H - 8; y++) for (let x = 8; x < W - 8; x++) {
+          sum += Math.abs(f.data[y * W + x] - refF.data[y * W + x]); n++;
+        }
+        return sum / n;
+      };
+      const rShift = await alignMergeFrequencyDomain(gpu, [refF, mkFrame(2, 1)], opts, null);
+      let shiftSum = 0, shiftN = 0, shiftMax = 0;
+      for (let y = 8; y < H - 8; y++) for (let x = 8; x < W - 8; x++) {
+        const d = Math.abs(rShift.pixels[y * W + x] - refF.data[y * W + x]);
+        shiftSum += d; shiftN++; shiftMax = Math.max(shiftMax, d);
+      }
+      t10.shifted = { mean: shiftSum / shiftN, max: shiftMax, unalignedMean: noAlign(2, 1) };
+
+      // T13: merging twice must be deterministic (read-modify-write kernels must not race)
+      const rAgain = await alignMergeFrequencyDomain(gpu, [refF, mkFrame(2, 1)], opts, null);
+      let drift = 0;
+      for (let i = 0; i < rShift.pixels.length; i++) drift = Math.max(drift, Math.abs(rShift.pixels[i] - rAgain.pixels[i]));
+      t10.deterministic = drift === 0;
+
+      // T14: fresh alignment vs inspection-session grids → bit-identical output
+      const framesF = [mkFrame(0, 0), mkFrame(2, 1), mkFrame(-1, 2)];
+      const sessionF = await performInspection(gpu, framesF,
+        { tileSize: opts.tileSize, searchDistance: opts.searchDistance, refIdx: 0 }, null);
+      const grids = framesF.map((_, i) => {
+        const f = sessionF.frameList.find((fr) => fr.idx === i);
+        return f && !f.isRef ? { texels: f.texels, w: sessionF.tileInfo.w, h: sessionF.tileInfo.h } : null;
+      });
+      const rFresh = await alignMergeFrequencyDomain(gpu, framesF, opts, null);
+      const rReuse = await alignMergeFrequencyDomain(gpu, framesF, { ...opts, prealigned: grids }, null);
+      let reuseDelta = 0;
+      for (let i = 0; i < rFresh.pixels.length; i++) reuseDelta = Math.max(reuseDelta, Math.abs(rFresh.pixels[i] - rReuse.pixels[i]));
+      t10.reuseIdentical = reuseDelta === 0;
+      sessionF.destroy();
+    }
+
     return {
       stage: 'done',
       adapter: `${adapter.info?.vendor || '?'} ${adapter.info?.architecture || ''}`,
@@ -304,6 +456,7 @@ try {
       t8,
       t9,
       t7,
+      t10,
     };
   });
 
@@ -355,6 +508,29 @@ try {
       check(`T7 renders after a ref difference render stay non-black (${k})`, out.t7[k] > 0.1,
         `nonBlack=${(out.t7[k] * 100).toFixed(0)}%`);
     }
+
+    // ---- frequency-domain merge (T10) ----
+    check('T10 geometry derivation matches the Swift padding math', out.t10.geometryOk,
+      `canvas=${out.t10.geometry?.canvasW}×${out.t10.geometry?.canvasH} tiles=${out.t10.geometry?.nTilesX} padMerge=${out.t10.geometry?.padMergeX}`);
+    check('T10 robustness parameter derivation matches the Swift formulas', out.t10.paramsOk,
+      JSON.stringify(out.t10));
+    check('T10 FFT pair round trip (backward∘forward == window·x) < 0.05', out.t10.fftRoundTrip < 0.05,
+      `maxErr=${out.t10.fftRoundTrip?.toExponential(2)}`);
+    check('T10 place/rgba/bayer round trip preserves values, zero fill intact',
+      out.t10.placeRgbaBayer && out.t10.placeRgbaBayer.maxErr < 1e-2 && out.t10.placeRgbaBayer.zeroOk,
+      `maxErr=${out.t10.placeRgbaBayer?.maxErr} zeroOk=${out.t10.placeRgbaBayer?.zeroOk}`);
+    check('T11 frequency merge, constant identical frames reproduce the reference (< 3)',
+      out.t10.flatIdentical < 3, `maxDiff=${out.t10.flatIdentical}`);
+    check('T11 frequency merge, textured identical frames stay close (mean < 4, max < 40)',
+      out.t10.identical.mean < 4 && out.t10.identical.max < 40,
+      `mean=${out.t10.identical.mean?.toFixed(2)} max=${out.t10.identical.max}`);
+    check('T12 frequency merge tracks a (2,1)-shifted frame much better than no alignment',
+      out.t10.shifted.mean < out.t10.shifted.unalignedMean * 0.5 && out.t10.shifted.mean < 12,
+      `merged mean=${out.t10.shifted.mean?.toFixed(1)} vs unaligned ${out.t10.shifted.unalignedMean?.toFixed(1)} (max ${out.t10.shifted.max})`);
+    check('T13 frequency merge is deterministic across runs', out.t10.deterministic);
+    check('T14 frequency merge: fresh alignment == inspection-grid reuse (bit-identical)',
+      out.t10.reuseIdentical);
+    console.log('T10 details:', JSON.stringify(out.t10, (k, v) => typeof v === 'number' ? +v.toFixed(4) : v));
   }
 } catch (err) {
   console.log('FAIL  smoke test crashed —', String(err?.stack || err).slice(0, 1200));

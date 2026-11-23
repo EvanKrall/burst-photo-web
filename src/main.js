@@ -9,6 +9,7 @@
 import { initGPU, GPUContext } from './gpu.js';
 import { WGSL } from './kernels.js';
 import { alignMergeSpatial } from './pipeline.js';
+import { alignMergeFrequencyDomain } from './merge_frequency.js';
 import { performInspection } from './inspect.js';
 import { InspectorUI } from './inspector.js';
 import { decodeRaw } from './raw.js';
@@ -52,6 +53,7 @@ const EWMA_ALPHA = 0.3; // weight of a new measurement in the running average
 const DEFAULT_TIMINGS = { // ms, used until localStorage has real measurements
   decodePerShot: 120,
   alignMergePerShot: 900,
+  alignMergePerShotHQ: 3600,
   dng: 500,
   preview: 500,
 };
@@ -90,11 +92,11 @@ function recordTiming(key, ms) {
 
 // Re-weight the bar for a burst of nShots: scale the per-shot stages by shot
 // count, keep the constant stages fixed, normalize the widths to [0, 1].
-function planStageWidths(nShots) {
+function planStageWidths(nShots, algorithm = 'fast') {
   const est = loadTimingEstimates();
   const weight = {
     decode: est.decodePerShot * nShots,
-    alignMerge: est.alignMergePerShot * nShots,
+    alignMerge: (algorithm === 'hq' ? est.alignMergePerShotHQ : est.alignMergePerShot) * nShots,
     dng: est.dng,
     preview: est.preview,
   };
@@ -177,7 +179,8 @@ async function loadFiles(fileList) {
   downloadLink.removeAttribute('href');
   showPane('progress');
 
-  planStageWidths(files.length); // size the bar for this burst
+  // size the bar for this burst (the selected algorithm's per-shot merge cost)
+  planStageWidths(files.length, document.getElementById('mergeAlgorithm').value === 'hq' ? 'hq' : 'fast');
 
   let decodeMsTotal = 0;
   try {
@@ -402,6 +405,7 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
       searchDistance: Number(document.getElementById('searchDistance').value),
       noiseReduction: Number(document.getElementById('noiseReduction').value),
     };
+    const algorithm = document.getElementById('mergeAlgorithm').value === 'hq' ? 'hq' : 'fast';
     // validate the reuse offer (grid presence is guaranteed — the inspection aligned
     // every frame — but stay defensive)
     let prealigned = null;
@@ -418,24 +422,31 @@ async function processBurst(frameIndices = null, { reuse = null, returnToInspect
         }
       }
     }
-    log(`${prealigned ? 'Merging' : 'Aligning & merging'} ${frames.length} frames (spatial domain, tile=${options.tileSize}, search=${options.searchDistance}, noise=${options.noiseReduction})${prealigned ? ' — reusing the inspection alignment' : ''}…`);
+    const algoName = algorithm === 'hq' ? 'frequency domain (higher quality)' : 'spatial domain (fast)';
+    log(`${prealigned ? 'Merging' : 'Aligning & merging'} ${frames.length} frames (${algoName}, tile=${options.tileSize}, search=${options.searchDistance}, noise=${options.noiseReduction})${prealigned ? ' — reusing the inspection alignment' : ''}…`);
     if (prealigned) log(`reference: frame ${String(refIdxCapture).padStart(2, '0')} (inspection reference) — the per-frame pyramid search is skipped.`);
 
-    const result = await alignMergeSpatial(gpu, frames, { ...options, prealigned }, (p) => {
+    const mergeFn = algorithm === 'hq' ? alignMergeFrequencyDomain : alignMergeSpatial;
+    const result = await mergeFn(gpu, frames, { ...options, prealigned }, (p) => {
       const inner = p.total > 1 ? p.frame / p.total : 1;
       setProgress(stageProgress('alignMerge', inner), `${p.stage} ${p.frame}/${p.total}`);
       const t = p.timings;
       log(`${p.stage} ${p.frame}/${p.total}${t ? ` — prepare ${t.prepareMs.toFixed(0)} ms, ${t.reused ? 'warp' : 'align'} ${t.alignMs.toFixed(0)} ms, merge ${t.mergeMs.toFixed(0)} ms` : ''}`);
     });
 
-    log(`align+merge: ${result.timings.alignMergeMs.toFixed(0)} ms ` +
-        `(prepare ${result.timings.prepareMs.toFixed(0)} ms, finalize ${result.timings.finalizeMs.toFixed(0)} ms) — noise_sd=${result.noiseSd.toFixed(2)}`);
-    // Per-shot pipeline cost for the bar's width estimate. Deliberately
-    // totalMs (prepare + enqueue + finalize) / frames, not alignMergeMs: the
-    // CPU-side loop finishes enqueueing long before the GPU drains, and that
-    // drain lands in finalizeMs via the final readBack — totalMs is the wall
-    // time the alignMerge bar segment actually spans, per shot.
-    recordTiming('alignMergePerShot', result.timings.totalMs / frames.length);
+    if (algorithm === 'hq') {
+      log(`align+merge: ${result.timings.totalMs.toFixed(0)} ms ` +
+          `(align ${result.timings.alignMs.toFixed(0)} ms, 4 merge iterations ${result.timings.mergeMs.toFixed(0)} ms) — ` +
+          `robustness_norm=${result.params.robustnessNorm.toFixed(2)}, read_noise=${result.params.readNoise.toFixed(0)}, max_motion_norm=${result.params.maxMotionNorm.toFixed(2)}, merge canvas ${result.freq.canvasW}×${result.freq.canvasH}`);
+    } else {
+      log(`align+merge: ${result.timings.alignMergeMs.toFixed(0)} ms ` +
+          `(prepare ${result.timings.prepareMs.toFixed(0)} ms, finalize ${result.timings.finalizeMs.toFixed(0)} ms) — noise_sd=${result.noiseSd.toFixed(2)}`);
+    }
+    // Per-shot pipeline cost for the bar's width estimate (per algorithm — the
+    // frequency-domain merge is substantially slower than the spatial one).
+    // totalMs is used deliberately: the CPU-side loop finishes enqueueing long before
+    // the GPU drains, and the drain lands in the final readBack.
+    recordTiming(algorithm === 'hq' ? 'alignMergePerShotHQ' : 'alignMergePerShot', result.timings.totalMs / frames.length);
 
     // ---- DNG output (metadata follows Google's HDR+ convention) ----
     setProgress(stageProgress('dng', 0), 'writing DNG');
@@ -535,7 +546,7 @@ processBtn.addEventListener('click', () => {
 function updateProcessBtn() {
   processBtn.disabled = decoding || processing || loadedFrames.length < 2 || !settingsDirty;
 }
-for (const id of ['noiseReduction', 'tileSize', 'searchDistance']) {
+for (const id of ['noiseReduction', 'tileSize', 'searchDistance', 'mergeAlgorithm']) {
   document.getElementById(id).addEventListener('change', () => {
     settingsDirty = true;
     updateProcessBtn();

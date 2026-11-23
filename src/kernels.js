@@ -1,5 +1,6 @@
 // WGSL compute kernels — hand-ported from Burst Photo's Metal sources
-// (burstphoto/{align/align.metal, merge/spatial.metal, texture/texture.metal}).
+// (burstphoto/{align/align.metal, merge/spatial.metal, texture/texture.metal,
+// merge/frequency.metal}).
 //
 // Design notes:
 //  - Image planes are storage buffers of array<f32> (row-major, index = y*width + x)
@@ -605,4 +606,728 @@ fn sum_final(@builtin(local_invocation_id) lid: vec3<u32>,
     }
     if (lid.x == 0u) { sum_out[0] = reduce_aux[0]; }
 }
+// ===========================================================================
+// ==        FREQUENCY-DOMAIN MERGE (port of burstphoto/merge/frequency)    ==
+// ===========================================================================
+// Buffer layouts (all planes row-major, index = y * width + x):
+//  - bayer canvas (f32):     the padded frame embedded at the per-iteration offset;
+//                            exactly n_tiles_merge*16 bayer px wide/high
+//  - rgba plane (vec4<f32>): 2×2 bayer cells packed into one vec4 (convert_to_rgba);
+//                            dims = canvas dims / 2 = n_tiles_merge * 8
+//  - FT plane (vec4<f32>):   per 8×8-rgba merge tile a 16-column strip of interleaved
+//                            complex vec4s — Re at even x, Im at odd x — rows = tile
+//                            rows; dims (canvas_w, canvas_h/2), i.e. 2× rgba width
+// This port handles uniform-exposure bursts only, so the bracketed-exposure pieces of
+// the original are omitted: exposure_corr1/corr2 are 1, calculate_highlights_norm
+// writes 1.0 (→ dropped), and calculate_mismatch's exposure_factor is 1.
+
+const PI: f32 = 3.14159265358979;
+
+// ================================================================== place_f32
+// Embed (or crop) a padded frame into a larger/smaller zero-filled canvas at the given
+// offset — the per-iteration placement that the Swift implementation achieves by
+// preparing each frame with asymmetric padding (prepare_texture pad_left/right/top/
+// bottom). Keeping the alignment warp on the shared alignment padding instead means
+// inspection alignment grids stay bit-identical and are reused as-is.
+// Params: src_w, src_h, out_w, ox, oy (out_h = dispatch rows)
+struct PlaceParams { src_w: i32, src_h: i32, out_w: i32, ox: i32, oy: i32, };
+@group(0) @binding(0) var<storage, read>       place_in:  array<f32>;
+@group(0) @binding(1) var<storage, read_write> place_out: array<f32>;
+@group(0) @binding(2) var<uniform>             place_p:   PlaceParams;
+
+@compute @workgroup_size(8, 8)
+fn place_f32(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let x = i32(gid3.x);
+    let y = i32(gid3.y);
+    if (x >= place_p.out_w || y >= place_p.oy + place_p.src_h) { return; }  // exact-dispatch guard
+    let sx = x - place_p.ox;
+    let sy = y - place_p.oy;
+    if (sx >= 0 && sx < place_p.src_w && sy >= 0 && sy < place_p.src_h) {
+        place_out[y * place_p.out_w + x] = place_in[sy * place_p.src_w + sx];
+    } else {
+        place_out[y * place_p.out_w + x] = 0.0;
+    }
+}
+
+// ================================================================== crop_rect
+// Asymmetric crop of an f32 plane (out_w × out_h at offset (x0, y0)) — used for the
+// final per-iteration canvas crop (pad_merge + shift margins) and the mismatch-mean
+// tile rectangle (Swift: crop_texture + texture_mean).
+// Params: in_w, out_w, out_h, x0, y0
+struct CropRParams { in_w: i32, out_w: i32, out_h: i32, x0: i32, y0: i32, };
+@group(0) @binding(0) var<storage, read>       cropr_in:  array<f32>;
+@group(0) @binding(1) var<storage, read_write> cropr_out: array<f32>;
+@group(0) @binding(2) var<uniform>             cropr_p:   CropRParams;
+
+@compute @workgroup_size(8, 8)
+fn crop_rect(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= cropr_p.out_w || i32(gid3.y) >= cropr_p.out_h) { return; }  // exact-dispatch guard
+    let x = i32(gid3.x) + cropr_p.x0;
+    let y = i32(gid3.y) + cropr_p.y0;
+    cropr_out[i32(gid3.y) * cropr_p.out_w + i32(gid3.x)] = cropr_in[y * cropr_p.in_w + x];
+}
+
+// ======================================================== convert_to_rgba (freq)
+// Port of texture.metal:convert_to_rgba for the merge canvas: pack each 2×2 bayer cell
+// into one vec4. The Swift version's crop_merge trim is already applied by the canvas
+// placement, so this is a pure repack.
+// Params: in_w (canvas width), out_w, out_h
+struct C4Params { in_w: i32, out_w: i32, out_h: i32, };
+@group(0) @binding(0) var<storage, read>       c4_in:  array<f32>;
+@group(0) @binding(1) var<storage, read_write> c4_out: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform>             c4_p:   C4Params;
+
+@compute @workgroup_size(8, 8)
+fn convert_to_rgba(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= c4_p.out_w || i32(gid3.y) >= c4_p.out_h) { return; }  // exact-dispatch guard
+    let x = i32(gid3.x) * 2;
+    let y = i32(gid3.y) * 2;
+    let i0 = y * c4_p.in_w + x;
+    c4_out[i32(gid3.y) * c4_p.out_w + i32(gid3.x)] =
+        vec4<f32>(c4_in[i0], c4_in[i0 + 1], c4_in[i0 + c4_p.in_w], c4_in[i0 + c4_p.in_w + 1]);
+}
+
+// ======================================================== convert_to_bayer (freq)
+// Inverse of convert_to_rgba: spread each vec4 back over its 2×2 bayer cell.
+// Params: out_w (bayer canvas width)
+struct CbParams { out_w: i32, };
+@group(0) @binding(0) var<storage, read>       cb_in:  array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> cb_out: array<f32>;
+@group(0) @binding(2) var<uniform>             cb_p:   CbParams;
+
+@compute @workgroup_size(8, 8)
+fn convert_to_bayer(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let x = i32(gid3.x) * 2;
+    let y = i32(gid3.y) * 2;
+    let color = cb_in[i32(gid3.y) * (cb_p.out_w / 2) + i32(gid3.x)];
+    cb_out[y * cb_p.out_w + x] = color[0];
+    cb_out[y * cb_p.out_w + x + 1] = color[1];
+    cb_out[(y + 1) * cb_p.out_w + x] = color[2];
+    cb_out[(y + 1) * cb_p.out_w + x + 1] = color[3];
+}
+
+// ========================================================= calculate_rms_rgba
+// Port of frequency.metal:calculate_rms_rgba — per-merge-tile noise estimate of the
+// reference (shot-noise proxy; verbatim including the unusual normalization).
+// Params: rgba_w, n_tiles_x, n_tiles_y
+struct RmsParams { rgba_w: i32, n_tiles_x: i32, n_tiles_y: i32, };
+@group(0) @binding(0) var<storage, read>       rms_in:  array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> rms_out: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform>             rms_p:   RmsParams;
+
+@compute @workgroup_size(8, 8)
+fn calculate_rms_rgba(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= rms_p.n_tiles_x || i32(gid3.y) >= rms_p.n_tiles_y) { return; }  // exact-dispatch guard
+    let tile_size = 8;
+    let x0 = i32(gid3.x) * tile_size;
+    let y0 = i32(gid3.y) * tile_size;
+    var noise_est = vec4<f32>(0.0);
+    for (var dy = 0; dy < tile_size; dy++) {
+        for (var dx = 0; dx < tile_size; dx++) {
+            let d = rms_in[(y0 + dy) * rms_p.rgba_w + x0 + dx];
+            noise_est += d * d;
+        }
+    }
+    noise_est = 0.25 * sqrt(noise_est) / f32(tile_size);
+    rms_out[i32(gid3.y) * rms_p.n_tiles_x + i32(gid3.x)] = noise_est;
+}
+
+// ====================================================== calculate_abs_diff_rgba
+// Port of frequency.metal:calculate_abs_diff_rgba (element-wise).
+// Params: w, h (rgba plane dims)
+struct AdParams { w: i32, h: i32, };
+@group(0) @binding(0) var<storage, read>       ad_in1: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read>       ad_in2: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> ad_out: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform>             ad_p:   AdParams;
+
+@compute @workgroup_size(8, 8)
+fn calculate_abs_diff_rgba(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= ad_p.w || i32(gid3.y) >= ad_p.h) { return; }  // exact-dispatch guard
+    let i = gid3.y * u32(ad_p.w) + gid3.x;
+    ad_out[i] = abs(ad_in1[i] - ad_in2[i]);
+}
+
+// ==================================================== calculate_mismatch_rgba
+// Port of frequency.metal:calculate_mismatch_rgba — motion mismatch per merge tile:
+// raised-cosine-windowed absolute difference over a 2× tile-size support, normalized by
+// the tile noise estimate (uniform exposure: exposure_factor = 1).
+// Params: rgba_w, rgba_h, n_tiles_x
+struct MmParams { rgba_w: i32, rgba_h: i32, n_tiles_x: i32, };
+@group(0) @binding(0) var<storage, read>       mm_absdiff:  array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read>       mm_rms:      array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> mm_mismatch: array<f32>;
+@group(0) @binding(3) var<uniform>             mm_p:        MmParams;
+
+@compute @workgroup_size(8, 8)
+fn calculate_mismatch_rgba(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= mm_p.n_tiles_x || i32(gid3.y) >= (mm_p.rgba_h + 7) / 8) { return; }  // exact-dispatch guard
+    let tile_size = 8;
+    let x0 = i32(gid3.x) * tile_size;
+    let y0 = i32(gid3.y) * tile_size;
+    let noise_est = mm_rms[i32(gid3.y) * mm_p.n_tiles_x + i32(gid3.x)];
+
+    // spatial support twice the merge tile size, clamped at the frame borders
+    let x_start = max(0, x0 - tile_size / 2);
+    let y_start = max(0, y0 - tile_size / 2);
+    let x_end = min(mm_p.rgba_w - 1, x0 + tile_size * 3 / 2) + 1;
+    let y_end = min(mm_p.rgba_h - 1, y0 + tile_size * 3 / 2) + 1;
+    let x_shift = -(x0 - tile_size / 2);
+    let y_shift = -(y0 - tile_size / 2);
+
+    let angle = -2.0 * PI / f32(tile_size);
+    var tile_diff = vec4<f32>(0.0);
+    var n_total = 0.0;
+    for (var dy = y_start; dy < y_end; dy++) {
+        for (var dx = x_start; dx < x_end; dx++) {
+            let norm_cosine =
+                (0.5 - 0.17 * cos(-angle * (f32(dx + x_shift) + 0.5))) *
+                (0.5 - 0.17 * cos(-angle * (f32(dy + y_shift) + 0.5)));
+            tile_diff += norm_cosine * mm_absdiff[dy * mm_p.rgba_w + dx];
+            n_total += norm_cosine;
+        }
+    }
+    tile_diff /= n_total;
+
+    // mismatch ratio (quadratic Wiener terms deliberately not used — see the original's
+    // comment); uniform exposure: sqrt(0.5*n + 0.5*n/1 + 1)
+    let mismatch4 = tile_diff / sqrt(0.5 * noise_est + 0.5 * noise_est + vec4<f32>(1.0));
+    let mismatch = 0.25 * (mismatch4[0] + mismatch4[1] + mismatch4[2] + mismatch4[3]);
+    mm_mismatch[i32(gid3.y) * mm_p.n_tiles_x + i32(gid3.x)] = mismatch;
+}
+
+// ========================================================= normalize_mismatch
+// Port of frequency.metal:normalize_mismatch — scale so the interior mean maps to 0.12
+// and clamp to [0, 1]. mean_mismatch is computed on the interior tile rectangle (CPU).
+// Params: n (plane elements), mean_mismatch
+struct NmParams { n: u32, mean_mismatch: f32, };
+@group(0) @binding(0) var<storage, read_write> nm_mismatch: array<f32>;
+@group(0) @binding(1) var<uniform>             nm_p:       NmParams;
+
+@compute @workgroup_size(64)
+fn normalize_mismatch(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let i = gid3.x;
+    if (i >= nm_p.n) { return; }  // exact-dispatch guard
+    var m = nm_mismatch[i];
+    m *= 0.12 / (nm_p.mean_mismatch + 1e-12);
+    nm_mismatch[i] = clamp(m, 0.0, 1.0);
+}
+
+// ================================================================ forward_fft
+// Port of frequency.metal:forward_fft (8×8 real forward DFT with raised-cosine tile
+// windowing; exploits conjugate symmetry to transform rows 0..4 and mirror the rest).
+// One thread per merge tile. Params: rgba_w, ft_w, n_tiles_x, n_tiles_y
+struct FftParams { rgba_w: i32, ft_w: i32, n_tiles_x: i32, n_tiles_y: i32, norm: f32, };
+@group(0) @binding(0) var<storage, read>       ff_in:  array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> ff_out: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform>             ff_p:   FftParams;
+
+@compute @workgroup_size(8, 8)
+fn forward_fft(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= ff_p.n_tiles_x || i32(gid3.y) >= ff_p.n_tiles_y) { return; }  // exact-dispatch guard
+    let tile_size = 8;
+    let m0 = i32(gid3.x) * tile_size;
+    let n0 = i32(gid3.y) * tile_size;
+    let ts14 = tile_size / 4;
+    let ts24 = tile_size / 2;
+    let ts34 = ts14 * 3;
+    let angle = -2.0 * PI / f32(tile_size);
+
+    var tmp_data: array<vec4<f32>, 16>;
+    var tmp_tile: array<vec4<f32>, 80>;
+    let zeros4 = vec4<f32>(0.0);
+
+    // column-wise one-dimensional DFT along y; the input is real, so only rows 0..tile/2
+    // have to be computed (the rest follows from conjugate symmetry)
+    for (var dm = 0; dm < tile_size; dm += 2) {
+        let m = m0 + dm;
+        for (var dn = 0; dn < tile_size; dn++) {
+            tmp_data[2 * dn + 0] = ff_in[(n0 + dn) * ff_p.rgba_w + m];
+            tmp_data[2 * dn + 1] = ff_in[(n0 + dn) * ff_p.rgba_w + m + 1];
+        }
+        for (var dn = 0; dn <= tile_size / 2; dn++) {
+            let n_tmp = dn * 2 * tile_size;
+            var Re0 = zeros4; var Im0 = zeros4;
+            var Re1 = zeros4; var Im1 = zeros4;
+            for (var dy = 0; dy < tile_size; dy++) {
+                // modified raised cosine window for tile blending (overlapped tiles)
+                let norm_cosine0 = (0.5 - 0.5 * cos(-angle * (f32(dm) + 0.5))) * (0.5 - 0.5 * cos(-angle * (f32(dy) + 0.5)));
+                let norm_cosine1 = (0.5 - 0.5 * cos(-angle * (f32(dm) + 1.5))) * (0.5 - 0.5 * cos(-angle * (f32(dy) + 0.5)));
+                let coefRe = cos(angle * f32(dn * dy));
+                let coefIm = sin(angle * f32(dn * dy));
+                let dataRe0 = norm_cosine0 * tmp_data[2 * dy + 0];
+                Re0 += coefRe * dataRe0;
+                Im0 += coefIm * dataRe0;
+                let dataRe1 = norm_cosine1 * tmp_data[2 * dy + 1];
+                Re1 += coefRe * dataRe1;
+                Im1 += coefIm * dataRe1;
+            }
+            tmp_tile[n_tmp + 2 * dm + 0] = Re0;
+            tmp_tile[n_tmp + 2 * dm + 1] = Im0;
+            tmp_tile[n_tmp + 2 * dm + 2] = Re1;
+            tmp_tile[n_tmp + 2 * dm + 3] = Im1;
+        }
+    }
+
+    // row-wise FFT along x (rows 0..tile/2 only); four stride-4 sub-DFTs + two butterfly
+    // stages. Note the deliberate Re1/Re2 swap of the sub-DFT accumulators, matching the
+    // Metal original's output bin mapping.
+    for (var dn = 0; dn <= tile_size / 2; dn++) {
+        let n = n0 + dn;
+        for (var dm = 0; dm < tile_size; dm++) {
+            tmp_data[2 * dm + 0] = tmp_tile[dn * 2 * tile_size + 2 * dm + 0];
+            tmp_data[2 * dm + 1] = tmp_tile[dn * 2 * tile_size + 2 * dm + 1];
+        }
+        for (var dm = 0; dm < tile_size / 4; dm++) {
+            let m = 2 * (m0 + dm);
+            var Re0 = zeros4; var Im0 = zeros4;
+            var Re1 = zeros4; var Im1 = zeros4;
+            var Re2 = zeros4; var Im2 = zeros4;
+            var Re3 = zeros4; var Im3 = zeros4;
+            var Re00: vec4<f32>; var Re11: vec4<f32>; var Re22: vec4<f32>; var Re33: vec4<f32>;
+            var Im00: vec4<f32>; var Im11: vec4<f32>; var Im22: vec4<f32>; var Im33: vec4<f32>;
+            for (var dx = 0; dx < tile_size; dx += 4) {
+                let coefRe = cos(angle * f32(dm * dx));
+                let coefIm = sin(angle * f32(dm * dx));
+                var dataRe: vec4<f32>; var dataIm: vec4<f32>;
+                // DFT0
+                dataRe = tmp_data[2 * dx + 0]; dataIm = tmp_data[2 * dx + 1];
+                Re0 += (coefRe * dataRe - coefIm * dataIm);
+                Im0 += (coefIm * dataRe + coefRe * dataIm);
+                // DFT1
+                dataRe = tmp_data[2 * dx + 2]; dataIm = tmp_data[2 * dx + 3];
+                Re2 += (coefRe * dataRe - coefIm * dataIm);
+                Im2 += (coefIm * dataRe + coefRe * dataIm);
+                // DFT2
+                dataRe = tmp_data[2 * dx + 4]; dataIm = tmp_data[2 * dx + 5];
+                Re1 += (coefRe * dataRe - coefIm * dataIm);
+                Im1 += (coefIm * dataRe + coefRe * dataIm);
+                // DFT3
+                dataRe = tmp_data[2 * dx + 6]; dataIm = tmp_data[2 * dx + 7];
+                Re3 += (coefRe * dataRe - coefIm * dataIm);
+                Im3 += (coefIm * dataRe + coefRe * dataIm);
+            }
+
+            // first butterfly
+            var bRe = cos(angle * 2.0 * f32(dm));
+            var bIm = sin(angle * 2.0 * f32(dm));
+            Re00 = Re0 + bRe * Re1 - bIm * Im1;
+            Im00 = Im0 + bIm * Re1 + bRe * Im1;
+            Re22 = Re2 + bRe * Re3 - bIm * Im3;
+            Im22 = Im2 + bIm * Re3 + bRe * Im3;
+            bRe = cos(angle * 2.0 * f32(dm + ts14));
+            bIm = sin(angle * 2.0 * f32(dm + ts14));
+            Re11 = Re0 + bRe * Re1 - bIm * Im1;
+            Im11 = Im0 + bIm * Re1 + bRe * Im1;
+            Re33 = Re2 + bRe * Re3 - bIm * Im3;
+            Im33 = Im2 + bIm * Re3 + bRe * Im3;
+
+            // second butterfly
+            bRe = cos(angle * f32(dm)); bIm = sin(angle * f32(dm));
+            Re0 = Re00 + bRe * Re22 - bIm * Im22;
+            Im0 = Im00 + bIm * Re22 + bRe * Im22;
+            bRe = cos(angle * f32(dm + ts24)); bIm = sin(angle * f32(dm + ts24));
+            Re2 = Re00 + bRe * Re22 - bIm * Im22;
+            Im2 = Im00 + bIm * Re22 + bRe * Im22;
+            bRe = cos(angle * f32(dm + ts14)); bIm = sin(angle * f32(dm + ts14));
+            Re1 = Re11 + bRe * Re33 - bIm * Im33;
+            Im1 = Im11 + bIm * Re33 + bRe * Im33;
+            bRe = cos(angle * f32(dm + ts34)); bIm = sin(angle * f32(dm + ts34));
+            Re3 = Re11 + bRe * Re33 - bIm * Im33;
+            Im3 = Im11 + bIm * Re33 + bRe * Im33;
+
+            ff_out[n * ff_p.ft_w + m + 0] = Re0;
+            ff_out[n * ff_p.ft_w + m + 1] = Im0;
+            ff_out[n * ff_p.ft_w + m + ts24 + 0] = Re1;
+            ff_out[n * ff_p.ft_w + m + ts24 + 1] = Im1;
+            ff_out[n * ff_p.ft_w + m + tile_size + 0] = Re2;
+            ff_out[n * ff_p.ft_w + m + tile_size + 1] = Im2;
+            ff_out[n * ff_p.ft_w + m + ts24 * 3 + 0] = Re3;
+            ff_out[n * ff_p.ft_w + m + ts24 * 3 + 1] = Im3;
+
+            // conjugate-symmetric rows
+            if (dn > 0 && dn != tile_size / 2) {
+                let n2 = n0 + tile_size - dn;
+                let m20 = 2 * (m0 + min(dm, 1) * (tile_size - dm));
+                let m21 = 2 * (m0 + tile_size - dm - ts14);
+                let m22 = 2 * (m0 + tile_size - dm - ts24);
+                let m23 = 2 * (m0 + tile_size - dm - ts14 * 3);
+                ff_out[n2 * ff_p.ft_w + m20 + 0] = Re0;
+                ff_out[n2 * ff_p.ft_w + m20 + 1] = -Im0;
+                ff_out[n2 * ff_p.ft_w + m21 + 0] = Re1;
+                ff_out[n2 * ff_p.ft_w + m21 + 1] = -Im1;
+                ff_out[n2 * ff_p.ft_w + m22 + 0] = Re2;
+                ff_out[n2 * ff_p.ft_w + m22 + 1] = -Im2;
+                ff_out[n2 * ff_p.ft_w + m23 + 0] = Re3;
+                ff_out[n2 * ff_p.ft_w + m23 + 1] = -Im3;
+            }
+        }
+    }
+}
+
+// ================================================================ backward_fft
+// Port of frequency.metal:backward_fft — exact inverse of forward_fft (up to the
+// 1/(n_textures·tile²) normalization (the norm field), so each iteration's output is the
+// burst average including the reference, exactly like Swift's backward_ft).
+@group(0) @binding(0) var<storage, read>       bf_in:  array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> bf_out: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform>             bf_p:   FftParams;
+
+@compute @workgroup_size(8, 8)
+fn backward_fft(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= bf_p.n_tiles_x || i32(gid3.y) >= bf_p.n_tiles_y) { return; }  // exact-dispatch guard
+    let tile_size = 8;
+    let m0 = i32(gid3.x) * tile_size;
+    let n0 = i32(gid3.y) * tile_size;
+    let ts14 = tile_size / 4;
+    let ts24 = tile_size / 2;
+    let ts34 = ts14 * 3;
+    let angle = -2.0 * PI / f32(tile_size);
+
+    var tmp_data: array<vec4<f32>, 16>;
+    var tmp_tile: array<vec4<f32>, 128>;
+    let zeros4 = vec4<f32>(0.0);
+    let norm_factor = bf_p.norm;  // n_textures·tile_size²
+
+    // row-wise inverse FFT along x (all tile rows)
+    for (var dn = 0; dn < tile_size; dn++) {
+        let n_tmp = dn * 2 * tile_size;
+        for (var dm = 0; dm < tile_size; dm++) {
+            tmp_data[2 * dm + 0] = bf_in[(n0 + dn) * bf_p.ft_w + 2 * (m0 + dm) + 0];
+            tmp_data[2 * dm + 1] = bf_in[(n0 + dn) * bf_p.ft_w + 2 * (m0 + dm) + 1];
+        }
+        for (var dm = 0; dm < tile_size / 4; dm++) {
+            var Re0 = zeros4; var Im0 = zeros4;
+            var Re1 = zeros4; var Im1 = zeros4;
+            var Re2 = zeros4; var Im2 = zeros4;
+            var Re3 = zeros4; var Im3 = zeros4;
+            var Re00: vec4<f32>; var Re11: vec4<f32>; var Re22: vec4<f32>; var Re33: vec4<f32>;
+            var Im00: vec4<f32>; var Im11: vec4<f32>; var Im22: vec4<f32>; var Im33: vec4<f32>;
+            for (var dx = 0; dx < tile_size; dx += 4) {
+                let coefRe = cos(angle * f32(dm * dx));
+                let coefIm = sin(angle * f32(dm * dx));
+                var dataRe: vec4<f32>; var dataIm: vec4<f32>;
+                // DFT0
+                dataRe = tmp_data[2 * dx + 0]; dataIm = tmp_data[2 * dx + 1];
+                Re0 += (coefRe * dataRe + coefIm * dataIm);
+                Im0 += (coefIm * dataRe - coefRe * dataIm);
+                // DFT1
+                dataRe = tmp_data[2 * dx + 2]; dataIm = tmp_data[2 * dx + 3];
+                Re2 += (coefRe * dataRe + coefIm * dataIm);
+                Im2 += (coefIm * dataRe - coefRe * dataIm);
+                // DFT2
+                dataRe = tmp_data[2 * dx + 4]; dataIm = tmp_data[2 * dx + 5];
+                Re1 += (coefRe * dataRe + coefIm * dataIm);
+                Im1 += (coefIm * dataRe - coefRe * dataIm);
+                // DFT3
+                dataRe = tmp_data[2 * dx + 6]; dataIm = tmp_data[2 * dx + 7];
+                Re3 += (coefRe * dataRe + coefIm * dataIm);
+                Im3 += (coefIm * dataRe - coefRe * dataIm);
+            }
+
+            // first butterfly
+            var bRe = cos(angle * 2.0 * f32(dm));
+            var bIm = sin(angle * 2.0 * f32(dm));
+            Re00 = Re0 + bRe * Re1 - bIm * Im1;
+            Im00 = Im0 + bIm * Re1 + bRe * Im1;
+            Re22 = Re2 + bRe * Re3 - bIm * Im3;
+            Im22 = Im2 + bIm * Re3 + bRe * Im3;
+            bRe = cos(angle * 2.0 * f32(dm + ts14));
+            bIm = sin(angle * 2.0 * f32(dm + ts14));
+            Re11 = Re0 + bRe * Re1 - bIm * Im1;
+            Im11 = Im0 + bIm * Re1 + bRe * Im1;
+            Re33 = Re2 + bRe * Re3 - bIm * Im3;
+            Im33 = Im2 + bIm * Re3 + bRe * Im3;
+
+            // second butterfly
+            bRe = cos(angle * f32(dm)); bIm = sin(angle * f32(dm));
+            Re0 = Re00 + bRe * Re22 - bIm * Im22;
+            Im0 = Im00 + bIm * Re22 + bRe * Im22;
+            bRe = cos(angle * f32(dm + ts24)); bIm = sin(angle * f32(dm + ts24));
+            Re2 = Re00 + bRe * Re22 - bIm * Im22;
+            Im2 = Im00 + bIm * Re22 + bRe * Im22;
+            bRe = cos(angle * f32(dm + ts14)); bIm = sin(angle * f32(dm + ts14));
+            Re1 = Re11 + bRe * Re33 - bIm * Im33;
+            Im1 = Im11 + bIm * Re33 + bRe * Im33;
+            bRe = cos(angle * f32(dm + ts34)); bIm = sin(angle * f32(dm + ts34));
+            Re3 = Re11 + bRe * Re33 - bIm * Im33;
+            Im3 = Im11 + bIm * Re33 + bRe * Im33;
+
+            tmp_tile[n_tmp + 2 * dm + 0] = Re0;
+            tmp_tile[n_tmp + 2 * dm + 1] = -Im0;
+            tmp_tile[n_tmp + 2 * dm + ts24 + 0] = Re1;
+            tmp_tile[n_tmp + 2 * dm + ts24 + 1] = -Im1;
+            tmp_tile[n_tmp + 2 * dm + tile_size + 0] = Re2;
+            tmp_tile[n_tmp + 2 * dm + tile_size + 1] = -Im2;
+            tmp_tile[n_tmp + 2 * dm + ts24 * 3 + 0] = Re3;
+            tmp_tile[n_tmp + 2 * dm + ts24 * 3 + 1] = -Im3;
+        }
+    }
+
+    // column-wise inverse DFT along y (real output: Im discarded)
+    for (var dm = 0; dm < tile_size; dm++) {
+        let m = m0 + dm;
+        for (var dn = 0; dn < tile_size; dn++) {
+            tmp_data[2 * dn + 0] = tmp_tile[dn * 2 * tile_size + 2 * dm + 0];
+            tmp_data[2 * dn + 1] = tmp_tile[dn * 2 * tile_size + 2 * dm + 1];
+        }
+        for (var dn = 0; dn < tile_size / 4; dn++) {
+            let n = n0 + dn;
+            var Re0 = zeros4; var Im0 = zeros4;
+            var Re1 = zeros4; var Im1 = zeros4;
+            var Re2 = zeros4; var Im2 = zeros4;
+            var Re3 = zeros4; var Im3 = zeros4;
+            var Re00: vec4<f32>; var Re11: vec4<f32>; var Re22: vec4<f32>; var Re33: vec4<f32>;
+            var Im00: vec4<f32>; var Im11: vec4<f32>; var Im22: vec4<f32>; var Im33: vec4<f32>;
+            for (var dy = 0; dy < tile_size; dy += 4) {
+                let coefRe = cos(angle * f32(dn * dy));
+                let coefIm = sin(angle * f32(dn * dy));
+                var dataRe: vec4<f32>; var dataIm: vec4<f32>;
+                // DFT0
+                dataRe = tmp_data[2 * dy + 0]; dataIm = tmp_data[2 * dy + 1];
+                Re0 += (coefRe * dataRe + coefIm * dataIm);
+                Im0 += (coefIm * dataRe - coefRe * dataIm);
+                // DFT1
+                dataRe = tmp_data[2 * dy + 2]; dataIm = tmp_data[2 * dy + 3];
+                Re2 += (coefRe * dataRe + coefIm * dataIm);
+                Im2 += (coefIm * dataRe - coefRe * dataIm);
+                // DFT2
+                dataRe = tmp_data[2 * dy + 4]; dataIm = tmp_data[2 * dy + 5];
+                Re1 += (coefRe * dataRe + coefIm * dataIm);
+                Im1 += (coefIm * dataRe - coefRe * dataIm);
+                // DFT3
+                dataRe = tmp_data[2 * dy + 6]; dataIm = tmp_data[2 * dy + 7];
+                Re3 += (coefRe * dataRe + coefIm * dataIm);
+                Im3 += (coefIm * dataRe - coefRe * dataIm);
+            }
+
+            // first butterfly
+            var bRe = cos(angle * 2.0 * f32(dn));
+            var bIm = sin(angle * 2.0 * f32(dn));
+            Re00 = Re0 + bRe * Re1 - bIm * Im1;
+            Im00 = Im0 + bIm * Re1 + bRe * Im1;
+            Re22 = Re2 + bRe * Re3 - bIm * Im3;
+            Im22 = Im2 + bIm * Re3 + bRe * Im3;
+            bRe = cos(angle * 2.0 * f32(dn + ts14));
+            bIm = sin(angle * 2.0 * f32(dn + ts14));
+            Re11 = Re0 + bRe * Re1 - bIm * Im1;
+            Im11 = Im0 + bIm * Re1 + bRe * Im1;
+            Re33 = Re2 + bRe * Re3 - bIm * Im3;
+            Im33 = Im2 + bIm * Re3 + bRe * Im3;
+
+            // second butterfly
+            bRe = cos(angle * f32(dn)); bIm = sin(angle * f32(dn));
+            Re0 = Re00 + bRe * Re22 - bIm * Im22;
+            bRe = cos(angle * f32(dn + ts24)); bIm = sin(angle * f32(dn + ts24));
+            Re2 = Re00 + bRe * Re22 - bIm * Im22;
+            bRe = cos(angle * f32(dn + ts14)); bIm = sin(angle * f32(dn + ts14));
+            Re1 = Re11 + bRe * Re33 - bIm * Im33;
+            bRe = cos(angle * f32(dn + ts34)); bIm = sin(angle * f32(dn + ts34));
+            Re3 = Re11 + bRe * Re33 - bIm * Im33;
+
+            let r0 = Re0 / norm_factor;
+            let r1 = Re1 / norm_factor;
+            let r2 = Re2 / norm_factor;
+            let r3 = Re3 / norm_factor;
+            bf_out[n * bf_p.rgba_w + m] = r0;
+            bf_out[(n + ts14) * bf_p.rgba_w + m] = r1;
+            bf_out[(n + ts24) * bf_p.rgba_w + m] = r2;
+            bf_out[(n + ts34) * bf_p.rgba_w + m] = r3;
+        }
+    }
+}
+
+// =================================================== merge_frequency_domain
+// Port of frequency.metal:merge_frequency_domain — the core pairwise Wiener merge with
+// Fourier-shift-theorem sub-pixel alignment (7×7 candidate shifts per merge tile).
+// uniform exposure: uniform_exposure == 1 and highlights_norm == 1 (dropped).
+// Params: ft_w, n_tiles_x, n_tiles_y, robustness_norm, read_noise, max_motion_norm
+struct MfParams {
+    ft_w: i32, n_tiles_x: i32, n_tiles_y: i32,
+    robustness_norm: f32, read_noise: f32, max_motion_norm: f32,
+};
+@group(0) @binding(0) var<storage, read>       mf_ref:      array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read>       mf_aligned:  array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> mf_out:      array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read>       mf_rms:      array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read>       mf_mismatch: array<f32>;
+@group(0) @binding(5) var<uniform>             mf_p:        MfParams;
+
+@compute @workgroup_size(8, 8)
+fn merge_frequency_domain(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= mf_p.n_tiles_x || i32(gid3.y) >= mf_p.n_tiles_y) { return; }  // exact-dispatch guard
+    let tile_size = 8;
+    let m0 = i32(gid3.x) * tile_size;
+    let n0 = i32(gid3.y) * tile_size;
+    let tile = i32(gid3.y) * mf_p.n_tiles_x + i32(gid3.x);
+
+    // combine estimated shot noise and read noise; normalize with tile size + robustness
+    let noise_est = mf_rms[tile] + vec4<f32>(mf_p.read_noise);
+    let noise_norm = noise_est * f32(tile_size) * f32(tile_size) * mf_p.robustness_norm;
+
+    // motion norm from the mismatch texture (Liba 2019 Fig. 9f-style linear ramp)
+    let mismatch = mf_mismatch[tile];
+    let mismatch_weight = clamp(1.0 - 10.0 * (mismatch - 0.2), 0.0, 1.0);
+    let motion_norm = clamp(mf_p.max_motion_norm - (mismatch - 0.02) * (mf_p.max_motion_norm - 1.0) / 0.15, 1.0, mf_p.max_motion_norm);
+
+    let angle = -2.0 * PI / f32(tile_size);
+    let shift_step_size = 1.0 / 6.0;
+
+    var total_diff: array<f32, 49>;
+    for (var i = 0; i < 49; i++) { total_diff[i] = 0.0; }
+
+    // sub-pixel alignment via the Fourier shift theorem: test shifts between -0.5 and
+    // +0.5 px on the per-color-channel pixel scale (-1..+1 px on the sensor scale)
+    for (var dn = 0; dn < tile_size; dn++) {
+        for (var dm = 0; dm < tile_size; dm++) {
+            let m = 2 * (m0 + dm);
+            let n = n0 + dn;
+            let refRe = mf_ref[n * mf_p.ft_w + m];
+            let refIm = mf_ref[n * mf_p.ft_w + m + 1];
+            let alignedRe = mf_aligned[n * mf_p.ft_w + m];
+            let alignedIm = mf_aligned[n * mf_p.ft_w + m + 1];
+            for (var i = 0; i < 49; i++) {
+                let shift_x = -0.5 + f32(i % 7) * shift_step_size;
+                let shift_y = -0.5 + f32(i / 7) * shift_step_size;
+                let coefRe = cos(angle * (f32(dm) * shift_x + f32(dn) * shift_y));
+                let coefIm = sin(angle * (f32(dm) * shift_x + f32(dn) * shift_y));
+                let aRe2 = refRe - (coefRe * alignedRe - coefIm * alignedIm);
+                let aIm2 = refIm - (coefIm * alignedRe + coefRe * alignedIm);
+                let w4 = aRe2 * aRe2 + aIm2 * aIm2;
+                total_diff[i] += w4[0] + w4[1] + w4[2] + w4[3];
+            }
+        }
+    }
+
+    var best_diff = 1e20;
+    var best_i = 0;
+    for (var i = 0; i < 49; i++) {
+        if (total_diff[i] < best_diff) { best_diff = total_diff[i]; best_i = i; }
+    }
+    let best_shift_x = -0.5 + f32(best_i % 7) * shift_step_size;
+    let best_shift_y = -0.5 + f32(best_i / 7) * shift_step_size;
+
+    // pairwise merge of the two tiles (Hasinoff 2016 eq. 6 / Monod 2021 eq. 10)
+    for (var dn = 0; dn < tile_size; dn++) {
+        for (var dm = 0; dm < tile_size; dm++) {
+            let m = 2 * (m0 + dm);
+            let n = n0 + dn;
+            let refRe = mf_ref[n * mf_p.ft_w + m];
+            let refIm = mf_ref[n * mf_p.ft_w + m + 1];
+            let alignedRe = mf_aligned[n * mf_p.ft_w + m];
+            let alignedIm = mf_aligned[n * mf_p.ft_w + m + 1];
+
+            let coefRe = cos(angle * (f32(dm) * best_shift_x + f32(dn) * best_shift_y));
+            let coefIm = sin(angle * (f32(dm) * best_shift_x + f32(dn) * best_shift_y));
+            let aRe2 = coefRe * alignedRe - coefIm * alignedIm;
+            let aIm2 = coefIm * alignedRe + coefRe * alignedIm;
+
+            // sharper tiles (larger frequency magnitude relative to the reference) merge
+            // with more weight (Delbracio 2015 eq. 3); skipped at zero frequency and for
+            // mismatched tiles (uniform_exposure == 1, so the boost is active)
+            var magnitude_norm = 1.0;
+            if (dm + dn > 0 && mismatch < 0.3) {
+                let refMag = sqrt(refRe * refRe + refIm * refIm);
+                let alignedMag2 = sqrt(aRe2 * aRe2 + aIm2 * aIm2);
+                let ratio_mag = (alignedMag2[0] + alignedMag2[1] + alignedMag2[2] + alignedMag2[3])
+                              / (refMag[0] + refMag[1] + refMag[2] + refMag[3]);
+                magnitude_norm = mismatch_weight * clamp(ratio_mag * ratio_mag * ratio_mag * ratio_mag, 0.5, 3.0);
+            }
+
+            // Wiener shrinkage weight; per-channel weights → mean of the two central
+            // values (a slight robustness tweak over the publications' max)
+            var weight4 = (refRe - aRe2) * (refRe - aRe2) + (refIm - aIm2) * (refIm - aIm2);
+            weight4 = weight4 / (weight4 + magnitude_norm * motion_norm * noise_norm);
+            let min_weight = min(weight4[0], min(weight4[1], min(weight4[2], weight4[3])));
+            let max_weight = max(weight4[0], max(weight4[1], max(weight4[2], weight4[3])));
+            let weight = clamp(0.5 * (weight4[0] + weight4[1] + weight4[2] + weight4[3] - min_weight - max_weight), 0.0, 1.0);
+
+            let idx_re = n * mf_p.ft_w + m;
+            mf_out[idx_re] = mf_out[idx_re] + (1.0 - weight) * aRe2 + weight * refRe;
+            mf_out[idx_re + 1] = mf_out[idx_re + 1] + (1.0 - weight) * aIm2 + weight * refIm;
+        }
+    }
+}
+
+// ============================================ deconvolute_frequency_domain
+// Port of frequency.metal:deconvolute_frequency_domain — mild frequency-dependent gain
+// to correct blur from sub-pixel misalignment; weighted down for mismatched tiles and
+// strong frequencies. Fixed gains for the 8×8 merge tile (the 16-table in the original
+// is unreachable: tile_size_merge is pinned to 8).
+@group(0) @binding(0) var<storage, read_write> dc_ft:       array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read>       dc_mismatch: array<f32>;
+@group(0) @binding(2) var<uniform>             dc_p:        MfParams;
+
+@compute @workgroup_size(8, 8)
+fn deconvolute_frequency_domain(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= dc_p.n_tiles_x || i32(gid3.y) >= dc_p.n_tiles_y) { return; }  // exact-dispatch guard
+    let tile_size = 8;
+    let m0 = i32(gid3.x) * tile_size;
+    let n0 = i32(gid3.y) * tile_size;
+    let tile = i32(gid3.y) * dc_p.n_tiles_x + i32(gid3.x);
+    var cw = array<f32, 16>(0.00, 0.02, 0.04, 0.08, 0.04, 0.08, 0.04, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    let mismatch = dc_mismatch[tile];
+    let mismatch_weight = clamp(1.0 - 10.0 * (mismatch - 0.2), 0.0, 1.0);
+
+    let convRe0 = dc_ft[n0 * dc_p.ft_w + 2 * m0];
+    let convIm0 = dc_ft[n0 * dc_p.ft_w + 2 * m0 + 1];
+    let convMag0 = sqrt(convRe0 * convRe0 + convIm0 * convIm0);
+    let magnitude_zero = convMag0[0] + convMag0[1] + convMag0[2] + convMag0[3];
+
+    for (var dn = 0; dn < tile_size; dn++) {
+        for (var dm = 0; dm < tile_size; dm++) {
+            if (dm + dn > 0 && mismatch < 0.3) {
+                let m = 2 * (m0 + dm);
+                let n = n0 + dn;
+                let convRe = dc_ft[n * dc_p.ft_w + m];
+                let convIm = dc_ft[n * dc_p.ft_w + m + 1];
+                let convMag = sqrt(convRe * convRe + convIm * convIm);
+                let magnitude = convMag[0] + convMag[1] + convMag[2] + convMag[3];
+                // weight 0 for ratio >= 0.05, 1 for ratio <= 0.01
+                let weight = mismatch_weight * clamp(1.25 - 25.0 * magnitude / magnitude_zero, 0.0, 1.0);
+                let gain = (1.0 + weight * cw[dm]) * (1.0 + weight * cw[dn]);
+                let idx = n * dc_p.ft_w + m;
+                dc_ft[idx] = gain * convRe;
+                dc_ft[idx + 1] = gain * convIm;
+            }
+        }
+    }
+}
+
+// ============================================ reduce_artifacts_tile_border
+// Port of frequency.metal:reduce_artifacts_tile_border — clamp negative (sub-black)
+// values and blend tile-border pixels with the reference via the raised cosine window.
+// Params: rgba_w, n_tiles_x, n_tiles_y, black0..3 (reference black levels)
+struct RabParams { rgba_w: i32, n_tiles_x: i32, n_tiles_y: i32, black0: f32, black1: f32, black2: f32, black3: f32, };
+@group(0) @binding(0) var<storage, read_write> rab_out: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read>       rab_ref: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform>             rab_p:   RabParams;
+
+@compute @workgroup_size(8, 8)
+fn reduce_artifacts_tile_border(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    if (i32(gid3.x) >= rab_p.n_tiles_x || i32(gid3.y) >= rab_p.n_tiles_y) { return; }  // exact-dispatch guard
+    let tile_size = 8;
+    let x0 = i32(gid3.x) * tile_size;
+    let y0 = i32(gid3.y) * tile_size;
+    let min_values = vec4<f32>(rab_p.black0 - 1.0, rab_p.black1 - 1.0, rab_p.black2 - 1.0, rab_p.black3 - 1.0);
+    let max_values = vec4<f32>(UINT16_MAX_VAL);
+    let angle = -2.0 * PI / f32(tile_size);
+
+    for (var dy = 0; dy < tile_size; dy++) {
+        for (var dx = 0; dx < tile_size; dx++) {
+            let x = x0 + dx;
+            let y = y0 + dy;
+            let norm_cosine = (0.5 - 0.5 * cos(-angle * (f32(dx) + 0.5))) * (0.5 - 0.5 * cos(-angle * (f32(dy) + 0.5)));
+            let idx = y * rab_p.rgba_w + x;
+            var pixel_value = rab_out[idx];
+            pixel_value = clamp(pixel_value, norm_cosine * min_values, max_values);
+            if (dx == 0 || dx == tile_size - 1 || dy == 0 || dy == tile_size - 1) {
+                pixel_value = 0.5 * (norm_cosine * rab_ref[idx] + pixel_value);
+            }
+            rab_out[idx] = pixel_value;
+        }
+    }
+}
+
 `;

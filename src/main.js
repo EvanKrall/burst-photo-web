@@ -546,9 +546,54 @@ processBtn.addEventListener('click', () => {
 function updateProcessBtn() {
   processBtn.disabled = decoding || processing || loadedFrames.length < 2 || !settingsDirty;
 }
+
+// ---- persisted settings ----
+// The five user-facing controls survive a page refresh: every change is written
+// to localStorage and the saved values are restored at startup (falling back to
+// the HTML defaults on the first visit or when the entry is corrupted).
+const SETTINGS_KEY = 'burst-photo-web-settings-v1';
+const SETTING_IDS = ['mergeAlgorithm', 'noiseReduction', 'tileSize', 'searchDistance', 'inspectFirst'];
+
+function loadSettings() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}');
+  } catch {
+    saved = {}; // corrupted entry — keep the HTML defaults
+  }
+  for (const id of SETTING_IDS) {
+    const el = document.getElementById(id);
+    const value = saved[id];
+    if (value === undefined) continue;
+    if (el.type === 'checkbox') {
+      el.checked = value === true;
+    } else if ([...el.options].some((o) => o.value === value)) {
+      el.value = value; // ignore values that no longer exist among the options
+    }
+  }
+}
+
+function saveSettings() {
+  try {
+    const settings = {};
+    for (const id of SETTING_IDS) {
+      const el = document.getElementById(id);
+      settings[id] = el.type === 'checkbox' ? el.checked : el.value;
+    }
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // storage unavailable (e.g. private mode) — settings just don't persist
+  }
+}
+
+loadSettings();
 for (const id of ['noiseReduction', 'tileSize', 'searchDistance', 'mergeAlgorithm']) {
   document.getElementById(id).addEventListener('change', () => {
     settingsDirty = true;
+    saveSettings();
     updateProcessBtn();
   });
 }
+// "Inspect alignment first" only affects the flow, not the result, so it
+// persists without marking the current output stale.
+document.getElementById('inspectFirst').addEventListener('change', saveSettings);
